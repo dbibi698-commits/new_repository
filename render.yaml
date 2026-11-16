@@ -1,0 +1,10 @@
+# Render Blueprint for the Mark-LVII dashboard.
+# One web service only — the dashboard + API. The desktop HUD (PyQt + Gemini
+# Live voice) cannot run on Render; it stays on the PC.
+services:
+  - type: web
+    name: mark-lvii-dashboard
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m dashboard.render_entry

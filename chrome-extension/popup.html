@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 320px; margin: 0; padding: 14px; font-family: system-ui, sans-serif;
+         background: #07090f; color: #dde3ed; font-size: 13px; }
+  h1 { font-size: 15px; margin: 0 0 10px; color: #7dd3fc; }
+  #status { padding: 8px 10px; border-radius: 8px; background: #0f172a;
+            margin-bottom: 12px; line-height: 1.5; }
+  #status .ok { color: #4ade80; }
+  #status .bad { color: #f87171; }
+  label { display: block; margin: 10px 0 4px; color: #94a3b8; font-size: 12px; }
+  input { width: 100%; box-sizing: border-box; padding: 8px; border-radius: 6px;
+          border: 1px solid #334155; background: #0f172a; color: #dde3ed; }
+  .row { display: flex; gap: 8px; margin-top: 14px; }
+  button { flex: 1; padding: 9px; border: none; border-radius: 8px; cursor: pointer;
+           font-weight: 600; background: #2563eb; color: #fff; }
+  button.secondary { background: #1e293b; color: #dde3ed; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #msg { margin-top: 10px; min-height: 16px; color: #94a3b8; font-size: 12px;
+         white-space: pre-wrap; word-break: break-word; }
+  .note { margin-top: 12px; font-size: 11px; color: #64748b; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <h1>🌐 Mark-LVII Browser Control</h1>
+  <div id="status">Checking…</div>
+
+  <label for="dashboardUrl">Mark dashboard URL</label>
+  <input id="dashboardUrl" type="text"
+         placeholder="http://192.168.1.108:8000 or https://…onrender.com">
+
+  <label for="browserToken">Browser token</label>
+  <input id="browserToken" type="password" placeholder="from the Mark dashboard / config"
+         autocomplete="off">
+
+  <label for="loginUsername">Saved login — username / email</label>
+  <input id="loginUsername" type="text" placeholder="optional" autocomplete="off">
+
+  <label for="loginPassword">Saved login — password</label>
+  <input id="loginPassword" type="password" placeholder="optional" autocomplete="off">
+
+  <div class="row">
+    <button id="saveBtn">Save</button>
+    <button id="connectBtn" class="secondary">Connect</button>
+    <button id="testBtn" class="secondary">Test</button>
+  </div>
+  <div id="msg"></div>
+
+  <p class="note">🔒 Saved logins stay in <b>this browser only</b> — they are
+  never sent to Mark or the dashboard. Mark can ask the extension to log in,
+  but it never sees the password.</p>
+
+  <script src="popup.js"></script>
+</body>
+</html>
