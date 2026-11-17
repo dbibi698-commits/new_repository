@@ -151,6 +151,9 @@ class PluginRegistry:
                 "fields":    rec.settings.get("fields", []),
                 "values":    get_plugin_config(ns),
                 "action":    rec.settings.get("action"),   # optional test/connect button
+                # optional extra box the overlay builds inside this section,
+                # e.g. "create_repo" - see PluginSettingsOverlay._build_section.
+                "widget":    rec.settings.get("widget"),
             })
         return out
 

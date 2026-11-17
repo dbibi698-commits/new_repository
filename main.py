@@ -617,11 +617,12 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "github_create_repo",
-        "description": "Create a new GitHub repo. Call when the user says: notun repo banao, GitHub-e repo kholo.",
+        "description": "Create a new GitHub repo with the saved GitHub token. Call when the user says: notun repo banao, GitHub-e repo kholo.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "name": {"type": "STRING", "description": "New repository name."},
+                "description": {"type": "STRING", "description": "Short description for the repo (optional)."},
                 "private": {"type": "BOOLEAN", "description": "True = private repo (default false)."},
             },
             "required": ["name"],
@@ -934,6 +935,59 @@ def _keep_context_of(exc: BaseException) -> bool:
     return True
 
 
+def render_deploy_sync(service_id: str = "") -> str:
+    """Redeploy the Mark dashboard on Render — the one implementation every
+    trigger shares: the render_deploy voice/tool command, the HUD's
+    🌐 CONNECT RENDER button and the Plugin Settings action.
+
+    Uses the saved Render API key (core.connectors.get_token), finds the
+    mark-lvii-dashboard service by name when no service id is given, then
+    POSTs a deploy. Synchronous (blocking network calls) — call it from a
+    worker thread / executor, never from the Qt thread. Never raises: every
+    failure comes back as a short message string."""
+    try:
+        import requests as _rq
+    except Exception:
+        return ("Render deploy-er jonno requests lagbe — pip install requests, "
+                "tarpor abar bolo.")
+    try:
+        from core import connectors as _conn
+        _key = _conn.get_token("render_api_key")
+    except Exception:
+        _key = ""
+    if not _key:
+        return ("Render API key set kora nei — Plugin Settings > 🔗 CONNECTORS > "
+                "Render API key-e key-ta bosao (Render dashboard > Account Settings > API Keys), "
+                "tarpor abar bolo.")
+    _sid = (service_id or "").strip()
+    _h = {"Authorization": f"Bearer {_key}", "Accept": "application/json"}
+    try:
+        if not _sid:
+            _r = _rq.get("https://api.render.com/v1/services?limit=20",
+                         headers=_h, timeout=20)
+            if _r.status_code != 200:
+                return f"Render API theke service list pelam na (HTTP {_r.status_code})."
+            _body = _r.json()
+            _items = _body if isinstance(_body, list) else _body.get("services", [])
+            _hit = None
+            for _s in _items:
+                _svc = _s.get("service", _s) if isinstance(_s, dict) else {}
+                if "mark-lvii" in str(_svc.get("name", "")).lower():
+                    _hit = _svc
+                    break
+            if not _hit:
+                return ("Render-e mark-lvii-dashboard service pelam na — age "
+                        "RENDER_DEPLOY.md-er steps-e service-ta banao, tarpor deploy bolo.")
+            _sid = _hit.get("id", "")
+        _d = _rq.post(f"https://api.render.com/v1/services/{_sid}/deploys",
+                      headers=_h, json={"clearCache": False}, timeout=20)
+        if _d.status_code in (200, 201):
+            return "⏳ Render deploy shuru holo — dashboard update hochhe, koyek minute lagbe."
+        return f"Render deploy start korte parlam na (HTTP {_d.status_code})."
+    except Exception as e:
+        return f"Render API-te jete parlam na: {e}"
+
+
 class JarvisLive:
     def __init__(self, ui: JarvisUI):
         # Platform limits are announced once per run, not once per
@@ -1120,6 +1174,28 @@ class JarvisLive:
         self.ui.on_wake_manual   = self._ui_wake_manual   # () -> toggle awake/asleep
         self.ui.on_wake_install  = self._ui_wake_install  # () -> (ok, msg)
 
+        # ── 7-agent + automation wiring ──────────────────────────────────
+        # The automation scheduler needs a tool runner (registered below) and
+        # the action queue needs a drainer: HUD/dashboard quick actions only
+        # enqueue, this thread runs them. Both are best-effort — a failure
+        # here costs the feature, never the app.
+        self._automation_call_depth = 0
+        self._automation_depth_lock = threading.Lock()
+        try:
+            from core.automation import ENGINE as _auto_engine
+            _auto_engine.set_tool_runner(self._run_tool_for_automation)
+            _auto_engine.start()
+        except Exception as e:
+            print(f"[Automation] unavailable: {e}")
+        try:
+            threading.Thread(target=self._drain_action_queue, daemon=True).start()
+        except Exception as e:
+            print(f"[ActionQueue] drain thread unavailable: {e}")
+        try:
+            threading.Thread(target=self._poll_muse_results, daemon=True).start()
+        except Exception as e:
+            print(f"[MuseBridge] result poll unavailable: {e}")
+
     # ── Wake word: state machine ─────────────────────────────────────────────
 
     def _wake_state(self) -> dict:
@@ -1268,6 +1344,111 @@ class JarvisLive:
         except Exception as e:
             return outcome.failed(name, f"the tool raised an error: {e}")
         return outcome.failed(name, "no tool with this name is available")
+
+    def _run_tool_for_automation(self, name: str, parameters: dict) -> str:
+        """Run any tool (actions, plugins AND inline tools) for the automation
+        scheduler and the action queue. Returns the tool's short string result;
+        never raises. Inline tools go through _execute_tool on the event loop;
+        the _automation_call_depth flag tells _execute_tool to skip its own
+        agent bookkeeping so the automation engine stays the sole bookkeeper
+        (otherwise one step would count twice)."""
+        from core import outcome
+        parameters = parameters or {}
+        name = str(name or "").strip()
+        if not name:
+            return outcome.failed(name, "no tool name given")
+        # Actions + plugins first (no event loop needed).
+        try:
+            if self._action_registry.has(name):
+                return self._action_registry.run(name, parameters, {"player": self.ui})
+            if self._plugin_registry.has(name):
+                return self._plugin_registry.run(name, parameters,
+                                                 player=self.ui, session_memory=None)
+        except Exception as e:
+            return outcome.failed(name, f"the tool raised an error: {e}")
+        # Inline tools (TOOL_DECLARATIONS in this file) via _execute_tool.
+        loop = getattr(self, "_loop", None)
+        if loop is None or not loop.is_running():
+            return outcome.failed(name, "Mark is not connected yet — start the voice session first")
+        try:
+            _fc = types.FunctionCall(name=name, args=dict(parameters), id=f"auto-{time.time_ns()}")
+        except Exception as e:
+            return outcome.failed(name, f"could not build the tool call: {e}")
+        try:
+            with self._automation_depth_lock:
+                self._automation_call_depth += 1
+            try:
+                _resp = asyncio.run_coroutine_threadsafe(self._execute_tool(_fc), loop).result(timeout=120)
+            finally:
+                with self._automation_depth_lock:
+                    self._automation_call_depth -= 1
+            _res = (_resp.response or {}).get("result", "") if _resp is not None else ""
+            return str(_res or "Done.")
+        except Exception as e:
+            return outcome.failed(name, f"the tool raised an error: {e}")
+
+    def _drain_action_queue(self) -> None:
+        """Background drainer for HUD/dashboard quick actions: they only
+        enqueue (core/action_queue.py); this thread runs them one at a time
+        and logs the result. Never raises, never touches Qt directly."""
+        from core import action_queue as _aq
+        from core import mark_status as _ms
+        while True:
+            time.sleep(5)
+            try:
+                for _item in _aq.drain():
+                    _tool = str((_item or {}).get("tool", "") or "")
+                    _args = (_item or {}).get("args", {}) or {}
+                    if not _tool:
+                        continue
+                    try:
+                        _ms.set_current_task(f"{_tool} (quick action)")
+                        _res = self._run_tool_for_automation(_tool, dict(_args))
+                        _ms.set_last_response(str(_res)[:200])
+                        self.ui.write_log(f"SYS: ⚡ Quick action '{_tool}': {str(_res)[:200]}")
+                    except Exception as e:
+                        print(f"[ActionQueue] '{_tool}': {e}")
+                    finally:
+                        _ms.clear_task()
+            except Exception as e:
+                print(f"[ActionQueue] drain: {e}")
+
+    def _poll_muse_results(self) -> None:
+        """Announce finished Muse Bridge tasks in the chat: when Muse marks
+        a queued task done, its result is spoken/written here. Polls every
+        30 s. Already-done tasks are seeded as announced at startup, so a
+        restart never re-announces old results. Never raises."""
+        _announced: set[str] = set()
+        try:
+            from core import muse_bridge as _mb0
+            for _t in _mb0.list_tasks(status="done"):
+                _tid0 = str((_t or {}).get("id", "") or "")
+                if _tid0:
+                    _announced.add(_tid0)
+        except Exception:
+            pass
+        while True:
+            time.sleep(30)
+            try:
+                from core import muse_bridge as _mb
+                for _t in _mb.list_tasks(status="done"):
+                    _tid = str((_t or {}).get("id", "") or "")
+                    if not _tid or _tid in _announced:
+                        continue
+                    _announced.add(_tid)
+                    _res = str((_t or {}).get("result", "") or "").strip()
+                    _ins = str((_t or {}).get("instruction", "") or "")[:100]
+                    _msg = f"Muse task sesh: {_ins} — {_res[:300]}" if _res else f"Muse task sesh: {_ins}"
+                    try:
+                        self.plugin_say(_msg)
+                    except Exception:
+                        pass
+                    try:
+                        self.ui.write_log(f"SYS: 💬 {_msg}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[MuseBridge] poll: {e}")
 
     # ── Leaving ─────────────────────────────────────────────────────────────────
     # Closing the window used to end the process on the spot: the thread holding
@@ -1557,6 +1738,26 @@ class JarvisLive:
             return None
         return link
 
+    def request_render_deploy(self, callback=None) -> None:
+        """Thin trigger for a one-click Render deploy (HUD button / settings
+        action): runs render_deploy_sync() — the exact code the render_deploy
+        tool runs — on a worker thread, then hands the result string to
+        callback(result). The callback runs on that worker thread, so it must
+        route any UI update to the Qt thread via signals — never touch a
+        widget here. Never raises."""
+        def _run():
+            try:
+                res = render_deploy_sync()
+            except Exception as e:
+                res = f"Render deploy-e error: {e}"
+            if callable(callback):
+                try:
+                    callback(res)
+                except Exception:
+                    pass
+        threading.Thread(target=_run, daemon=True,
+                         name="mark-render-deploy").start()
+
     # ── 🔗 Connectors: EXE / APK builds ────────────────────────────────────
 
     def _start_build_exe(self, script: str) -> None:
@@ -1753,6 +1954,26 @@ class JarvisLive:
         if self._wake_enabled and not self._awake:
             self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
             return
+        # ── 7-agent + automation: status + keyword triggers ─────────────
+        try:
+            from core import mark_status as _ms
+            _ms.set_current_task(f"You: {text[:100]}")
+            from core import action_queue as _aq
+            _ms.set_queue_len(_aq.pending_count())
+        except Exception:
+            pass
+        try:
+            from core.automation import ENGINE as _auto_engine
+            for _task in _auto_engine.check_keyword(text):
+                _tid = str((_task or {}).get("id", "") or "")
+                _tname = str((_task or {}).get("name", "") or _tid)
+                if not _tid:
+                    continue
+                threading.Thread(target=_auto_engine.run_task_now, args=(_tid,),
+                                 daemon=True).start()
+                self.ui.write_log(f"SYS: ⚡ Automation '{_tname}' keyword-e trigger holo.")
+        except Exception:
+            pass
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"role": "user", "parts": [{"text": text}]},
@@ -2063,6 +2284,24 @@ class JarvisLive:
         # 🎭 MOOD & FEELINGS: read fresh at every session build, so a mood
         # change in Plugin Settings (or via set_mood) applies from the next
         # (re)connect — no app restart needed.
+        # 💪 NEVER REFUSE: every instruction gets work, not a bare "no".
+        parts.append(
+            "[NEVER REFUSE]\n"
+            "Never answer a task with a bare refusal. Work through this fallback "
+            "chain for EVERY instruction, in order, and say plainly what you did:\n"
+            "(a) try your local tools first; (b) try the connected services "
+            "(browser, Drive, GitHub, Render, phone link); (c) if it still cannot "
+            "be done locally, use the ask_muse tool — it queues the task for Muse "
+            "with the full context (instruction, what you already tried, relevant "
+            "files/state) and the result comes back into this chat; (d) for "
+            "genuinely impossible things — breaking a phone PIN/fingerprint lock, "
+            "stealing a paid system, or breaking into somebody else's accounts or "
+            "systems — do the CLOSEST working legitimate alternative on the user's "
+            "OWN devices/accounts instead, and say clearly what you did instead "
+            "and why the original cannot be done. Own-device security work (the "
+            "user's own PC/phone/accounts) is fine; other people's systems are "
+            "never a target. Never just say no — always do the next best real thing.\n\n"
+        )
         parts.append(_mood.prompt_paragraph())
 
         cfg = dict(
@@ -2183,8 +2422,17 @@ class JarvisLive:
             key      = args.get("key", "")
             value    = args.get("value", "")
             if key and value:
-                update_memory({category: {key: {"value": value}}})
-                print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
+                _incognito = False
+                try:
+                    from core.cat09_security import incognito_enabled as _incog
+                    _incognito = bool(_incog())
+                except Exception:
+                    pass
+                if _incognito:
+                    print("[Incognito] save_memory skipped — incognito mode is on.")
+                else:
+                    update_memory({category: {key: {"value": value}}})
+                    print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -2192,8 +2440,44 @@ class JarvisLive:
                 response={"result": "ok", "silent": True}
             )
 
+        # ── Guest mode: a guest may look and ask, but not change anything
+        # persistent. Scoped enforcement (cat09): the clearly-mutating
+        # entry points refuse here; reads keep working.
+        try:
+            from core.cat09_security import guest_mode_enabled as _guest_on
+            _guest = bool(_guest_on())
+        except Exception:
+            _guest = False
+        if _guest and name in ("save_memory", "automation", "agents_automation",
+                               "files_drive_cloud", "social_media", "build_tools",
+                               "youtube_upload", "facebook_upload_video",
+                               "instagram_upload_video"):
+            if not self.ui.muted:
+                self.ui.set_state("LISTENING")
+            return types.FunctionResponse(
+                id=fc.id, name=name,
+                response={"result": "Guest mode on ache — ei kajta guest korte parbe na. Owner-ke bolo Guest mode bondho korte."}
+            )
+
         loop   = asyncio.get_event_loop()
         result = "Done."
+
+        # ── 7-agent system: light up the owning worker agent ──────────
+        # The Live session (Mark, the parent) picks the tool; the registry
+        # makes that choice visible in the 🤖 AGENTS panel + dashboard.
+        # Never raises, never blocks: a registry failure must not break a
+        # tool call. (save_memory returns above, before this — a silent
+        # sub-second write is not worth flashing the panel for.)
+        _agent_id = ""
+        _agent_failed = False
+        try:
+            from core import agents as _agents_mod
+            _agent_id = _agents_mod.owner_of(name)
+            if _agent_id and getattr(self, "_automation_call_depth", 0) == 0:
+                _agents_mod.REGISTRY.start(
+                    _agent_id, f"{name}: {str(args)[:120]}")
+        except Exception:
+            _agent_id = ""
 
         try:
             if name == "recall_memory":
@@ -2309,7 +2593,8 @@ class JarvisLive:
             elif name == "github_create_repo":
                 from core import connectors as _conn
                 result = await loop.run_in_executor(None, lambda: _conn.github_create_repo(
-                    None, args.get("name", ""), bool(args.get("private", False))))
+                    None, args.get("name", ""), bool(args.get("private", False)),
+                    args.get("description", "") or ""))
 
             elif name == "github_list_repos":
                 from core import connectors as _conn
@@ -2433,13 +2718,25 @@ class JarvisLive:
                               "lagbe. Jarvis restart koro, tarpor abar bolo.")
                 else:
                     _act = (args.get("action", "") or "").strip().lower()
-                    if _act not in ("open", "navigate", "click", "type", "scroll", "read", "login"):
-                        result = "Browser-e ki korbo — open, navigate, click, type, scroll, read, na login?"
+                    if _act not in ("open", "navigate", "click", "type", "scroll", "read", "login",
+                                    "signup", "upload", "screenshot", "tabs", "bookmarks",
+                                    "fill", "close_popups", "autoscroll"):
+                        result = ("Browser-e ki korbo — open, navigate, click, type, scroll, "
+                                  "read, login, signup, upload, screenshot, tabs, bookmarks, "
+                                  "fill, close_popups, na autoscroll?")
                     else:
+                        # Per-action extras for the new extension commands
+                        # (the queue drops any key outside its whitelist).
+                        _extra = {}
+                        for _k in ("tab_action", "tab_id", "bookmark_action", "bookmark_id",
+                                   "title", "fields", "max_steps", "submit"):
+                            if args.get(_k) is not None:
+                                _extra[_k] = args.get(_k)
                         _cmd = await loop.run_in_executor(None, lambda: _srv.queue_browser_command(
                             _act, (args.get("url", "") or "").strip(),
                             (args.get("selector", "") or "").strip(),
-                            (args.get("text", "") or "").strip()))
+                            (args.get("text", "") or "").strip(),
+                            extra=_extra or None))
                         _res = await loop.run_in_executor(
                             None, lambda: _srv.wait_browser_result(_cmd, 60.0))
                         if _res.get("ok"):
@@ -2504,49 +2801,9 @@ class JarvisLive:
                               "Local dashboard-e cholche ekhon.")
 
             elif name == "render_deploy":
-                def _deploy_sync():
-                    try:
-                        import requests as _rq
-                    except Exception:
-                        return ("Render deploy-er jonno requests lagbe — pip install requests, "
-                                "tarpor abar bolo.")
-                    try:
-                        from core import connectors as _conn
-                        _key = _conn.get_token("render_api_key")
-                    except Exception:
-                        _key = ""
-                    if not _key:
-                        return ("Render API key set kora nei — Plugin Settings > 🔗 CONNECTORS > "
-                                "Render API key-e key-ta bosao (Render dashboard > Account Settings > API Keys), "
-                                "tarpor abar bolo.")
-                    _sid = (args.get("service_id", "") or "").strip()
-                    _h = {"Authorization": f"Bearer {_key}", "Accept": "application/json"}
-                    try:
-                        if not _sid:
-                            _r = _rq.get("https://api.render.com/v1/services?limit=20",
-                                         headers=_h, timeout=20)
-                            if _r.status_code != 200:
-                                return f"Render API theke service list pelam na (HTTP {_r.status_code})."
-                            _body = _r.json()
-                            _items = _body if isinstance(_body, list) else _body.get("services", [])
-                            _hit = None
-                            for _s in _items:
-                                _svc = _s.get("service", _s) if isinstance(_s, dict) else {}
-                                if "mark-lvii" in str(_svc.get("name", "")).lower():
-                                    _hit = _svc
-                                    break
-                            if not _hit:
-                                return ("Render-e mark-lvii-dashboard service pelam na — age "
-                                        "RENDER_DEPLOY.md-er steps-e service-ta banao, tarpor deploy bolo.")
-                            _sid = _hit.get("id", "")
-                        _d = _rq.post(f"https://api.render.com/v1/services/{_sid}/deploys",
-                                      headers=_h, json={"clearCache": False}, timeout=20)
-                        if _d.status_code in (200, 201):
-                            return "⏳ Render deploy shuru holo — dashboard update hochhe, koyek minute lagbe."
-                        return f"Render deploy start korte parlam na (HTTP {_d.status_code})."
-                    except Exception as e:
-                        return f"Render API-te jete parlam na: {e}"
-                result = await loop.run_in_executor(None, _deploy_sync)
+                result = await loop.run_in_executor(
+                    None, lambda: render_deploy_sync(
+                        (args.get("service_id", "") or "").strip()))
 
             elif name == "build_exe":
                 _script = (args.get("script", "") or "main.py").strip()
@@ -2654,6 +2911,13 @@ class JarvisLive:
             result = f"Tool '{name}' failed: {e}"
             traceback.print_exc()
             self.speak_error(name, e)
+            _agent_failed = True
+            if _agent_id and getattr(self, "_automation_call_depth", 0) == 0:
+                try:
+                    from core import agents as _agents_mod
+                    _agents_mod.REGISTRY.fail(_agent_id, str(e)[:200])
+                except Exception:
+                    pass
 
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
@@ -2673,6 +2937,14 @@ class JarvisLive:
         _sched = (self._action_registry.scheduling(name)
                   or self._plugin_registry.scheduling(name))
         _extra = {"scheduling": _sched} if _sched else {}
+        # 7-agent system: the owning worker agent finishes (unless the
+        # except above already marked it failed).
+        if _agent_id and not _agent_failed and getattr(self, "_automation_call_depth", 0) == 0:
+            try:
+                from core import agents as _agents_mod
+                _agents_mod.REGISTRY.done(_agent_id, str(result)[:200])
+            except Exception:
+                pass
         return types.FunctionResponse(
             id=fc.id, name=name,
             response={"result": result},
@@ -2962,6 +3234,12 @@ class JarvisLive:
                                     full_out = ""
                             if full_out:
                                 self._last_out_logged = full_out
+                                try:
+                                    from core import mark_status as _ms
+                                    _ms.set_last_response(full_out[:200])
+                                    _ms.clear_task()
+                                except Exception:
+                                    pass
                                 self.ui.write_log(f"{self._asst_name}: {full_out}")
                                 self._session_log.append(f"{self._asst_name}: {full_out}")
                                 # 📱 Jarvis Link voice: this turn's spoken audio

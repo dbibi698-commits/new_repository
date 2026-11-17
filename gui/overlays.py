@@ -28,7 +28,7 @@ from PyQt6.QtGui import (
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QGraphicsScene, QGraphicsView, QGraphicsPixmapItem,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSlider,
@@ -1396,9 +1396,16 @@ class PluginSettingsOverlay(QWidget):
     core stays clean and plugins remain pure drop-in — install a plugin that
     declares fields (e.g. the 3D-printer suite) and its section appears here;
     install none and this panel simply says there's nothing to configure.
+
+    One documented exception: a section may declare "widget": "create_repo"
+    (the 🔗 CONNECTORS plugin does) and the overlay builds the "Create
+    Repository" box at the end of that section — name / description / private
+    / Create button / clickable result. The box calls core/connectors.py on a
+    worker thread and never touches widgets off the Qt thread.
     """
 
     _test_done = pyqtSignal(str, bool, str)   # namespace, ok, message
+    _repo_done = pyqtSignal(bool, str)        # create-repo finished: ok, message
     _OW = 460
 
     def __init__(self, sections: list[dict], parent=None):
@@ -1416,6 +1423,14 @@ class PluginSettingsOverlay(QWidget):
         self._types:   dict[tuple, str]    = {}     # (namespace, key) -> field type
         self._status_labels: dict[str, QLabel] = {} # namespace -> status QLabel
         self._test_done.connect(self._on_test_done)
+        # Create-Repository box widgets (only built when a section declares
+        # "widget": "create_repo"); None until then.
+        self._repo_name: object = None
+        self._repo_desc: object = None
+        self._repo_private: object = None
+        self._repo_create_btn: object = None
+        self._repo_result: object = None
+        self._repo_done.connect(self._on_repo_done)
 
         self._fs = (f"QLineEdit {{ background: #000d12; color: {C.TEXT}; "
                     f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
@@ -1563,6 +1578,11 @@ class PluginSettingsOverlay(QWidget):
         self._status_labels[ns] = status
         form.addWidget(status)
 
+        # Optional extra box declared by the section, e.g. "create_repo"
+        # (🔗 CONNECTORS): rendered at the end of this section.
+        if sec.get("widget") == "create_repo":
+            self._build_create_repo_box(form)
+
         line = QFrame(); line.setFrameShape(QFrame.Shape.HLine)
         line.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
         form.addWidget(line)
@@ -1641,6 +1661,131 @@ class PluginSettingsOverlay(QWidget):
         lbl.setText(msg)
         color = C.PRI if ok else "#ff6b6b"
         lbl.setStyleSheet(f"color: {color}; background: transparent;")
+
+    # ── Create Repository box (GitHub token diye repo banano) ───────────────
+    def _build_create_repo_box(self, form: QVBoxLayout):
+        """'📦 CREATE REPOSITORY' box at the end of the 🔗 CONNECTORS section.
+
+        Fields: repository name, description (optional), Private checkbox,
+        Create button, result line (new repo URL is clickable). The GitHub
+        token is read from the SAVED config only — never typed here, never
+        shown, never logged. The API call runs on a worker thread; the result
+        comes back through _repo_done so only the Qt thread touches widgets.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl("📦  CREATE REPOSITORY — GitHub", 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "GitHub token diye notun repo banao. Token-ta oporer GitHub token "
+            "field-e bosiye SAVE korte hobe — token kokhono ekhane likho na.",
+            8, color=C.TEXT_DIM))
+
+        form.addWidget(self._lbl("REPOSITORY NAME", 8, color=C.TEXT_DIM))
+        self._repo_name = QLineEdit()
+        self._repo_name.setFont(hud_font(10))
+        self._repo_name.setFixedHeight(30)
+        self._repo_name.setStyleSheet(self._fs)
+        self._repo_name.setPlaceholderText("e.g. my-new-repo")
+        form.addWidget(self._repo_name)
+
+        form.addWidget(self._lbl("DESCRIPTION (OPTIONAL)", 8, color=C.TEXT_DIM))
+        self._repo_desc = QLineEdit()
+        self._repo_desc.setFont(hud_font(10))
+        self._repo_desc.setFixedHeight(30)
+        self._repo_desc.setStyleSheet(self._fs)
+        self._repo_desc.setPlaceholderText("ki korbe ei repo-ta")
+        form.addWidget(self._repo_desc)
+
+        self._repo_private = QCheckBox("🔒  Private repo")
+        self._repo_private.setFont(hud_font(9))
+        self._repo_private.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._repo_private.setStyleSheet(
+            f"QCheckBox {{ color: {C.TEXT_MED}; background: transparent; }}"
+            f"QCheckBox::indicator {{ border: 1px solid {C.BORDER}; "
+            f"border-radius: 2px; width: 14px; height: 14px; }}"
+            f"QCheckBox::indicator:checked {{ background: {C.PRI}; "
+            f"border-color: {C.PRI}; }}")
+        form.addWidget(self._repo_private)
+
+        create_btn = QPushButton("▸  CREATE REPOSITORY")
+        create_btn.setFixedHeight(30)
+        create_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        create_btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            QPushButton:disabled {{ color: {C.BORDER}; border-color: {C.BORDER}; }}
+        """)
+        create_btn.clicked.connect(self._on_create_repo)
+        form.addWidget(create_btn)
+        self._repo_create_btn = create_btn
+
+        self._repo_result = QLabel("")
+        self._repo_result.setWordWrap(True)
+        self._repo_result.setFont(hud_font(8))
+        self._repo_result.setOpenExternalLinks(True)
+        self._repo_result.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction)
+        self._repo_result.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        form.addWidget(self._repo_result)
+
+    def _set_repo_result(self, ok: bool, msg: str, color: str | None = None):
+        if color is None:
+            color = C.PRI if ok else "#ff6b6b"
+        self._repo_result.setText(msg)
+        self._repo_result.setStyleSheet(
+            f"color: {color}; background: transparent;")
+
+    def _on_create_repo(self):
+        name = (self._repo_name.text() or "").strip()
+        if not name:
+            self._set_repo_result(False, "Repo-r naam dao.")
+            return
+        try:
+            from core import connectors as _conn
+            token = _conn.get_token("github_token")
+        except Exception:
+            token = ""
+        if not token:
+            # The token field sits in this same overlay, just above the box —
+            # the user only has to paste it there and hit SAVE.
+            self._set_repo_result(False,
+                "GitHub token set kora nei — opore GitHub token field-e token "
+                "bosao, SAVE chapho, tarpor ekhane Create chapho.")
+            return
+        desc = (self._repo_desc.text() or "").strip()
+        private = bool(self._repo_private.isChecked())
+        self._repo_create_btn.setEnabled(False)
+        self._set_repo_result(False, "Creating…", color=C.TEXT_DIM)
+        threading.Thread(target=self._create_repo_worker,
+                         args=(name, desc, private), daemon=True).start()
+
+    def _create_repo_worker(self, name: str, desc: str, private: bool):
+        try:
+            from core import connectors as _conn
+            res = _conn.github_create_repo(None, name, private, desc)
+            ok = isinstance(res, str) and res.startswith("✅")
+        except Exception as e:
+            ok, res = False, f"Repo banate parlam na: {e}"
+        self._repo_done.emit(ok, res)
+
+    def _on_repo_done(self, ok: bool, msg: str):
+        self._repo_create_btn.setEnabled(True)
+        if ok:
+            import re as _re
+            m = _re.search(r"https://github\.com/\S+", msg)
+            url = m.group(0) if m else ""
+            if url:
+                self._set_repo_result(
+                    True, f"✅ Repo banalam: <a href=\"{url}\">{url}</a>")
+            else:
+                self._set_repo_result(True, msg)
+            self._repo_name.clear()
+            self._repo_desc.clear()
+            self._repo_private.setChecked(False)
+        else:
+            self._set_repo_result(False, msg)
 
 
 class RemoteKeyOverlay(QWidget):
