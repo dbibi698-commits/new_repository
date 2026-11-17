@@ -625,7 +625,9 @@ class HudCanvas(QWidget):
                     acc = qcol(C.GREEN)
                 else:
                     acc = qcol(C.PRI)
-            self._avatar.paint(p, cx, head_cy, r_head, main, acc, qcol(C.BG))
+            from gui.overlays import paint_assistant_logo
+            if not paint_assistant_logo(p, cx, head_cy, r_head):
+                self._avatar.paint(p, cx, head_cy, r_head, main, acc, qcol(C.BG))
         elif self._reactor is not None:
             ext = Reactor3D.TOP + Reactor3D.BOTTOM
             r = min(W * 0.25, band_h / ext)

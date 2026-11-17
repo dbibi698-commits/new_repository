@@ -1657,7 +1657,7 @@ load(); setInterval(load, 2000);
         # ── 🔍 FEATURES registry (dashboard) ─────────────────────────────
         # Qt-free copy of the adapter in gui/overlays.py: prefers
         # core/feature_registry (contract: resolve/search/list_category/
-        # counts/set_enabled/is_enabled over 1–13,700,000; landed
+        # counts/set_enabled/is_enabled over 1–23,720,000; landed
         # 2026-11-17, verified live), else the built 20,000-feature JSON
         # registry (data/features.json via plugins/jarvis_features).
         # Toggles fall back to config plugin_config["features"]["disabled"].
@@ -1749,7 +1749,7 @@ load(); setInterval(load, 2000);
                 n = int(number)
             except (TypeError, ValueError):
                 return None
-            if n < 1 or n > 13_700_000:
+            if n < 1 or n > 23_700_000:
                 return None
             fr = _feat_registry()
             if fr is not None and hasattr(fr, "resolve"):
@@ -2076,7 +2076,7 @@ p.sub{color:#8fa3bf;font-size:13px;text-align:center}
 </select>
 </div>
 <div class="bar">
-<input id="num" placeholder="Run by number — 1 – 13700000" inputmode="numeric">
+<input id="num" placeholder="Run by number — 1 – 23720000" inputmode="numeric">
 <button onclick="runNum()">▶ RUN</button>
 </div>
 <p id="st">Loading…</p>
@@ -2141,7 +2141,7 @@ async function runF(n){
 async function runNum(){
   const v = document.getElementById('num').value.trim();
   const n = parseInt(v, 10);
-  if(!n || n < 1 || n > 13700000){ document.getElementById('st').textContent = '⚠️ Number dao — 1 theke 13700000-er modhye.'; return; }
+  if(!n || n < 1 || n > 23720000){ document.getElementById('st').textContent = '⚠️ Number dao — 1 theke 23720000-er modhye.'; return; }
   runF(n);
 }
 load(); setInterval(load, 2000);

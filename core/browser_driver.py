@@ -1,0 +1,532 @@
+"""core/browser_driver.py — NO-EXTENSION browser driver for Mark-LVII.
+
+Drives the user's REAL installed Chrome — the one they are already logged
+into on github.com and dashboard.render.com — with no browser extension
+involved at all. The extension is a separate, already-delivered feature;
+nothing in this module imports it, talks to the dashboard browser-command
+queue, or depends on it in any way.
+
+Backend order (best first):
+
+1. "playwright" — Playwright for Python, ``channel="chrome"``, launched as a
+   PERSISTENT context over the user's own Chrome profile directory. A plain
+   ``launch(channel="chrome")`` uses a throwaway profile, so the user would
+   NOT be logged in — persistent context is the whole point. Fails honestly
+   when Chrome is already running with that profile (Chrome locks it).
+2. "cdp" — Playwright's ``connect_over_cdp("http://localhost:9222")`` to a
+   Chrome that is already running with ``--remote-debugging-port=9222``. If
+   nothing answers on 9222 and Chrome is NOT already running, the driver
+   launches Chrome itself with that flag + the user's profile, then attaches.
+   If Chrome IS already running without the flag, this backend cannot attach
+   (a second chrome.exe just opens a window in the running instance) and
+   says so plainly.
+3. "pyautogui" — last resort: screen mouse + keyboard only. It can navigate
+   (Ctrl+L, type URL, Enter) and move/click the mouse, but it CANNOT see the
+   DOM, so click/fill/read_text by selector are refused with a plain message
+   instead of pretending. The flows need DOM access, so they treat this
+   backend as "driver not ready".
+
+``ensure_driver()`` picks the best available backend and reports which one
+is active. Every method returns ``(ok, message)`` and never raises. No Qt
+anywhere in this module — it runs on worker threads.
+
+Playwright is installed on first use when missing (``pip install
+playwright``); with ``channel="chrome"`` no ``playwright install`` browser
+download is needed — the user's own Chrome is the browser.
+"""
+from __future__ import annotations
+
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+# Backends in preference order.
+BACKEND_PLAYWRIGHT = "playwright"
+BACKEND_CDP = "cdp"
+BACKEND_PYAUTOGUI = "pyautogui"
+
+CDP_PORT = 9222
+CDP_URL = f"http://localhost:{CDP_PORT}"
+_STEP_TIMEOUT_MS = 15000
+
+# Set once per process so a missing Playwright is only pip-installed once.
+_INSTALL_TRIED = False
+
+
+def default_user_data_dir() -> str:
+    """The user's real Chrome profile directory, per OS."""
+    system = platform.system()
+    home = os.path.expanduser("~")
+    if system == "Windows":
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        return os.path.join(base, "Google", "Chrome", "User Data")
+    if system == "Darwin":
+        return os.path.join(home, "Library", "Application Support",
+                            "Google", "Chrome")
+    return os.path.join(home, ".config", "google-chrome")
+
+
+def find_chrome_exe() -> str:
+    """Path to the user's installed Chrome, or "" when none is found."""
+    for name in ("google-chrome", "google-chrome-stable", "chromium",
+                 "chromium-browser", "chrome"):
+        found = shutil.which(name)
+        if found:
+            return found
+    if platform.system() == "Windows":
+        for cand in (
+            os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+                         "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+                         "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                         "Google", "Chrome", "Application", "chrome.exe"),
+        ):
+            if cand and os.path.isfile(cand):
+                return cand
+    if platform.system() == "Darwin":
+        cand = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def _load_playwright():
+    """The ``sync_playwright`` callable, or None when Playwright is missing."""
+    try:
+        from playwright.sync_api import sync_playwright
+        return sync_playwright
+    except Exception:
+        return None
+
+
+def _try_install_playwright() -> bool:
+    """Best-effort ``pip install playwright`` (once per process). Returns
+    True when Playwright imports afterwards. Never raises."""
+    global _INSTALL_TRIED
+    if _INSTALL_TRIED:
+        return _load_playwright() is not None
+    _INSTALL_TRIED = True
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet",
+             "playwright>=1.40,<2"],
+            capture_output=True, timeout=300)
+    except Exception:
+        return False
+    return _load_playwright() is not None
+
+
+def _load_pyautogui():
+    """The pyautogui module, or None (headless machines import-fail)."""
+    try:
+        import pyautogui
+        return pyautogui
+    except Exception:
+        return None
+
+
+def _chrome_already_running() -> bool:
+    """Best-effort check whether a Chrome process is already up."""
+    try:
+        if platform.system() == "Windows":
+            out = subprocess.run(["tasklist"], capture_output=True,
+                                 text=True, timeout=10).stdout or ""
+            return "chrome.exe" in out.lower()
+        out = subprocess.run(["pgrep", "-x", "chrome"], capture_output=True,
+                             timeout=10)
+        if out.returncode == 0:
+            return True
+        out = subprocess.run(["pgrep", "-f", "google-chrome"],
+                             capture_output=True, timeout=10)
+        return out.returncode == 0
+    except Exception:
+        return False
+
+
+class Driver:
+    """One browser session behind a single backend.
+
+    ``backend`` is "playwright" | "cdp" | "pyautogui" | "" (not launched).
+    ``dom_capable`` is False for the pyautogui backend — it has no DOM.
+    Use :func:`ensure_driver` instead of building one by hand.
+    """
+
+    def __init__(self, backend: str = "", playwright_fn=None,
+                 pyautogui_mod=None, user_data_dir: str | None = None):
+        self.backend = backend
+        self.dom_capable = backend in (BACKEND_PLAYWRIGHT, BACKEND_CDP)
+        self._pw_fn = playwright_fn
+        self._pag = pyautogui_mod
+        self.user_data_dir = user_data_dir or default_user_data_dir()
+        self._pw = None          # sync_playwright instance
+        self._browser = None     # playwright Browser / CDP browser
+        self._context = None     # playwright BrowserContext (persistent)
+        self._page = None        # playwright Page
+        self._cdp_proc = None    # Chrome we launched ourselves for CDP
+        self._launched_by_us = False
+
+    # ── lifecycle ────────────────────────────────────────────────────────
+
+    def launch(self) -> tuple[bool, str]:
+        """Start the backend this Driver was built for. Never raises."""
+        try:
+            if self.backend == BACKEND_PLAYWRIGHT:
+                return self._launch_playwright()
+            if self.backend == BACKEND_CDP:
+                return self._launch_cdp()
+            if self.backend == BACKEND_PYAUTOGUI:
+                return self._launch_pyautogui()
+            return False, "No backend picked — use ensure_driver() first."
+        except Exception as e:  # never raise out of the driver
+            return False, f"Browser launch failed: {e}"
+
+    def _launch_playwright(self) -> tuple[bool, str]:
+        pw_fn = self._pw_fn or _load_playwright()
+        if pw_fn is None:
+            return False, "Playwright install kora nei."
+        try:
+            self._pw = pw_fn().start()
+        except Exception as e:
+            return False, f"Playwright start holo na: {e}"
+        try:
+            # Persistent context over the USER's profile = their logins and
+            # cookies. A plain launch() would use a throwaway profile and
+            # the user would be logged out everywhere.
+            self._context = self._pw.chromium.launch_persistent_context(
+                self.user_data_dir, channel="chrome", headless=False,
+                args=["--start-maximized"])
+            pages = list(self._context.pages or [])
+            self._page = pages[0] if pages else self._context.new_page()
+            self._launched_by_us = True
+            return True, ("Playwright + tomar Chrome (profile diye) — "
+                          "github.com / Render-e login thakle cholbe.")
+        except Exception as e:
+            self._stop_pw_quietly()
+            msg = str(e)
+            if "already running" in msg.lower() or "profile" in msg.lower() \
+                    or "singleton" in msg.lower() or "lock" in msg.lower():
+                return False, ("Chrome already khula ache ei profile diye — "
+                               "Playwright profile lock korte parlo na. "
+                               "Chrome bondho kore abar try koro, na CDP "
+                               "backend use koro.")
+            return False, f"Playwright Chrome khulte parlo na: {e}"
+
+    def _launch_cdp(self) -> tuple[bool, str]:
+        pw_fn = self._pw_fn or _load_playwright()
+        if pw_fn is None:
+            return False, "Playwright install kora nei — CDP-o cholbe na."
+        try:
+            self._pw = pw_fn().start()
+        except Exception as e:
+            return False, f"Playwright start holo na: {e}"
+        # 1) Something already listening on 9222?
+        ok, msg = self._cdp_attach()
+        if ok:
+            return True, msg
+        # 2) Launch Chrome ourselves with the debugging flag — only works
+        # when Chrome is NOT already running (otherwise the new process just
+        # opens a window in the running instance and the flag is ignored).
+        if _chrome_already_running():
+            self._stop_pw_quietly()
+            return False, ("Chrome khula ache kintu --remote-debugging-port "
+                           "chara — CDP attach kora jabe na. Chrome bondho "
+                           "kore abar try koro, na Chrome-e ei flag diye "
+                           "kholo: chrome --remote-debugging-port=9222")
+        chrome = find_chrome_exe()
+        if not chrome:
+            self._stop_pw_quietly()
+            return False, "Chrome install khuje pelam na ei PC-te."
+        try:
+            self._cdp_proc = subprocess.Popen(
+                [chrome, f"--remote-debugging-port={CDP_PORT}",
+                 f"--user-data-dir={self.user_data_dir}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            self._stop_pw_quietly()
+            return False, f"Chrome launch korte parlam na: {e}"
+        for _ in range(20):  # up to ~10 s for the DevTools port to answer
+            time.sleep(0.5)
+            ok, msg = self._cdp_attach()
+            if ok:
+                self._launched_by_us = True
+                return True, msg
+        self._stop_pw_quietly()
+        return False, "Chrome khullam kintu CDP port 9222-e answer dilo na."
+
+    def _cdp_attach(self) -> tuple[bool, str]:
+        try:
+            self._browser = self._pw.chromium.connect_over_cdp(CDP_URL)
+            contexts = list(self._browser.contexts or [])
+            if not contexts:
+                return False, "CDP connect holo kintu kono context pelam na."
+            ctx = contexts[0]
+            pages = list(ctx.pages or [])
+            self._context = ctx
+            self._page = pages[0] if pages else ctx.new_page()
+            return True, ("CDP diye cholti Chrome-e attach holo — tomar "
+                          "login/cookies kaj korbe.")
+        except Exception as e:
+            return False, f"CDP attach holo na: {e}"
+
+    def _launch_pyautogui(self) -> tuple[bool, str]:
+        pag = self._pag if self._pag is not None else _load_pyautogui()
+        if pag is None:
+            return False, "pyautogui load holo na (headless PC-te cholbe na)."
+        self._pag = pag
+        try:
+            self._pag.FAILSAFE = False
+        except Exception:
+            pass
+        return True, ("pyautogui mouse/keyboard backend — sudhu navigate "
+                      "ar mouse click; form fill / page read kora jabe na.")
+
+    def _stop_pw_quietly(self) -> None:
+        try:
+            if self._pw is not None:
+                self._pw.stop()
+        except Exception:
+            pass
+        self._pw = None
+        self._browser = None
+        self._context = None
+        self._page = None
+
+    def close(self) -> tuple[bool, str]:
+        """Detach. Never closes the user's own running Chrome (CDP backend):
+        only a browser this driver launched itself is closed."""
+        try:
+            if self._page is not None and self.backend == BACKEND_PLAYWRIGHT:
+                try:
+                    self._context.close()
+                except Exception:
+                    pass
+            if self._cdp_proc is not None:
+                try:
+                    self._cdp_proc.terminate()
+                except Exception:
+                    pass
+                self._cdp_proc = None
+            self._stop_pw_quietly()
+            self._page = None
+            return True, "Browser driver bondho holo."
+        except Exception as e:
+            return False, f"Driver bondho korte giye error: {e}"
+
+    # ── helpers ──────────────────────────────────────────────────────────
+
+    def current_url(self) -> str:
+        try:
+            if self._page is not None:
+                return str(getattr(self._page, "url", "") or "")
+        except Exception:
+            pass
+        return ""
+
+    def _need_dom(self) -> tuple[bool, str] | None:
+        """(False, reason) when this backend cannot touch the DOM."""
+        if self._page is None:
+            if self.backend == BACKEND_PYAUTOGUI:
+                return (False, "pyautogui backend-e DOM dekha jay na — "
+                        "Playwright/CDP backend lagbe.")
+            return (False, "Browser driver launch kora nei — age launch koro.")
+        return None
+
+    def _need_page(self):
+        return self._page
+
+    # ── actions ──────────────────────────────────────────────────────────
+
+    def navigate(self, url: str) -> tuple[bool, str]:
+        """Go to a URL. pyautogui backend: Ctrl+L, type, Enter."""
+        try:
+            url = (url or "").strip()
+            if not url:
+                return False, "navigate-e URL dao."
+            if self.backend == BACKEND_PYAUTOGUI:
+                if self._pag is None:
+                    return False, "pyautogui backend launch kora nei."
+                self._pag.hotkey("ctrl", "l")
+                time.sleep(0.4)
+                self._pag.typewrite(url, interval=0.01)
+                self._pag.press("enter")
+                time.sleep(1.0)
+                return True, f"Address bar-e gelam: {url}"
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            self._page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            time.sleep(1.0)
+            return True, f"Gelam: {self.current_url() or url}"
+        except Exception as e:
+            return False, f"Navigate korte parlam na ({url}): {e}"
+
+    def click(self, selector: str) -> tuple[bool, str]:
+        """Click one element. Playwright selectors: CSS, ``text=...``,
+        ``button:has-text('...')`` — see the flows in browser_automation."""
+        try:
+            selector = (selector or "").strip()
+            if not selector:
+                return False, "click-e selector dao."
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            self._page.click(selector, timeout=_STEP_TIMEOUT_MS)
+            time.sleep(0.6)
+            return True, f"Click korlam: {selector}"
+        except Exception as e:
+            return False, f"Click korte parlam na ({selector}): {e}"
+
+    def fill(self, selector: str, text: str) -> tuple[bool, str]:
+        """Fill a text field (clears it first)."""
+        try:
+            selector = (selector or "").strip()
+            if not selector:
+                return False, "fill-e selector dao."
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            self._page.fill(selector, text or "", timeout=_STEP_TIMEOUT_MS)
+            return True, f"Bhorlam: {selector}"
+        except Exception as e:
+            return False, f"Field bhorte parlam na ({selector}): {e}"
+
+    def wait_for_selector(self, selector: str,
+                          timeout_ms: int = 15000) -> tuple[bool, str]:
+        """Wait until an element appears. DOM backends only."""
+        try:
+            selector = (selector or "").strip()
+            if not selector:
+                return False, "wait_for_selector-e selector dao."
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            self._page.wait_for_selector(selector, timeout=timeout_ms)
+            return True, f"Pelam: {selector}"
+        except Exception as e:
+            return False, f"Element aslo na ({selector}): {e}"
+
+    def read_text(self, selector: str | None = None) -> tuple[bool, str]:
+        """Page (or one element's) visible text. DOM backends only."""
+        try:
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            if selector:
+                return True, str(self._page.locator(selector).inner_text(
+                    timeout=_STEP_TIMEOUT_MS))
+            return True, str(self._page.locator("body").inner_text(
+                timeout=_STEP_TIMEOUT_MS))
+        except Exception as e:
+            return False, f"Page porte parlam na: {e}"
+
+    def screenshot(self, path: str) -> tuple[bool, str]:
+        """Save a screenshot to path. Works on every backend."""
+        try:
+            path = (path or "").strip()
+            if not path:
+                return False, "screenshot-e path dao."
+            if self.backend == BACKEND_PYAUTOGUI:
+                if self._pag is None:
+                    return False, "pyautogui backend launch kora nei."
+                self._pag.screenshot(path)
+                return True, f"Screenshot nilam: {path}"
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            self._page.screenshot(path=path)
+            return True, f"Screenshot nilam: {path}"
+        except Exception as e:
+            return False, f"Screenshot nite parlam na: {e}"
+
+    def mouse_move(self, x: int, y: int) -> tuple[bool, str]:
+        try:
+            if self.backend == BACKEND_PYAUTOGUI:
+                if self._pag is None:
+                    return False, "pyautogui backend launch kora nei."
+                self._pag.moveTo(int(x), int(y))
+            else:
+                blocked = self._need_dom()
+                if blocked:
+                    return blocked
+                self._page.mouse.move(int(x), int(y))
+            return True, f"Mouse gelam ({x}, {y})"
+        except Exception as e:
+            return False, f"Mouse move holo na: {e}"
+
+    def mouse_click(self, x: int, y: int) -> tuple[bool, str]:
+        try:
+            if self.backend == BACKEND_PYAUTOGUI:
+                if self._pag is None:
+                    return False, "pyautogui backend launch kora nei."
+                self._pag.click(int(x), int(y))
+            else:
+                blocked = self._need_dom()
+                if blocked:
+                    return blocked
+                self._page.mouse.click(int(x), int(y))
+            return True, f"Mouse click ({x}, {y})"
+        except Exception as e:
+            return False, f"Mouse click holo na: {e}"
+
+    def wait(self, seconds: float) -> tuple[bool, str]:
+        """Pause. Always succeeds (even with no browser)."""
+        try:
+            time.sleep(max(0.0, float(seconds or 0)))
+            return True, f"Wait korlam {seconds}s"
+        except Exception as e:
+            return False, f"Wait korte parlam na: {e}"
+
+
+def ensure_driver(auto_install: bool = True, playwright_fn=None,
+                  pyautogui_mod=None,
+                  user_data_dir: str | None = None) -> tuple[Driver | None, str, str]:
+    """Pick the best available backend and launch it.
+
+    Returns ``(driver, backend, message)`` — driver is None when nothing
+    works, and the message then says plainly what is missing. ``playwright_fn``
+    / ``pyautogui_mod`` exist so tests can inject fakes; production code
+    never passes them.
+    """
+    pw_fn = playwright_fn if playwright_fn is not None else _load_playwright()
+    if pw_fn is None and auto_install:
+        _try_install_playwright()
+        pw_fn = _load_playwright()
+
+    if pw_fn is not None:
+        drv = Driver(BACKEND_PLAYWRIGHT, playwright_fn=pw_fn,
+                     user_data_dir=user_data_dir)
+        ok, msg = drv.launch()
+        if ok:
+            return drv, BACKEND_PLAYWRIGHT, msg
+        pw_msg = msg
+        # Persistent-context launch failed (usually: Chrome already running
+        # with this profile) — try CDP against the running Chrome.
+        drv2 = Driver(BACKEND_CDP, playwright_fn=pw_fn,
+                      user_data_dir=user_data_dir)
+        ok2, msg2 = drv2.launch()
+        if ok2:
+            return drv2, BACKEND_CDP, msg2
+        cdp_msg = msg2
+    else:
+        pw_msg = "Playwright install kora nei."
+        cdp_msg = "Playwright chara CDP-o cholbe na."
+
+    pag = pyautogui_mod if pyautogui_mod is not None else _load_pyautogui()
+    if pag is not None:
+        drv3 = Driver(BACKEND_PYAUTOGUI, pyautogui_mod=pag,
+                      user_data_dir=user_data_dir)
+        ok3, msg3 = drv3.launch()
+        if ok3:
+            # Honest: this backend cannot run the flows — it has no DOM.
+            return drv3, BACKEND_PYAUTOGUI, msg3
+
+    return None, "", (
+        "Chrome driver ready noy — Playwright install korte hobe. "
+        f"(Playwright: {pw_msg} CDP: {cdp_msg} "
+        "pyautogui-o pelam na.) PC-te `pip install playwright` chalao, "
+        "tarpor abar try koro.")

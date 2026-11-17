@@ -171,6 +171,40 @@ class PluginRegistry:
             })
         return out
 
+    # -- 500-entry data-driven catalog (core/plugin_catalog.py) --
+    def list_catalog(self, search: str = "") -> list[dict]:
+        """Plugin Settings catalog: the 500 catalog entries matching `search`,
+        each with its live enable state. See module-level list_catalog() for
+        the enable-key scheme."""
+        return list_catalog(search)
+
+
+def list_catalog(search: str = "") -> list[dict]:
+    """Module-level catalog listing (no registry instance needed).
+
+    Returns one dict per matching entry: the catalog fields (name,
+    description, trigger, tool, category) plus:
+      "key":     config key for this entry's toggle --
+                 "catalog_" + slug(name), e.g. "catalog_voice_play_music"
+                 (see core.plugin_catalog.catalog_key). Stored under
+                 config["plugins_enabled"] via get_plugin_enabled() /
+                 save_plugin_enabled(), the same opt-out store real plugins
+                 use, so an entry defaults to ON and toggling it needs no
+                 restart. The key is namespaced ("catalog_...") so it can
+                 never collide with a real plugin's name.
+      "enabled": get_plugin_enabled(key) -- re-read from config on every call,
+                 like list_for_ui(), so a toggle takes effect immediately.
+
+    The catalog itself is pure data (no .py file per entry); "tool" names the
+    real plugin/action/inline/connector tool that executes the entry.
+    """
+    from core.plugin_catalog import catalog_key, search_catalog
+    out = []
+    for e in search_catalog(search):
+        key = catalog_key(e["name"])
+        out.append({**e, "key": key, "enabled": get_plugin_enabled(key)})
+    return out
+
 
 def _call_run(run_fn, parameters, player, session_memory):
     """Invoke run() passing only the kwargs it actually declares (or all of them

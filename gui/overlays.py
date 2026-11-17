@@ -24,7 +24,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
-    QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
+    QFontDatabase, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath,
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
@@ -41,9 +41,59 @@ from gui.theme import (
     qcol,
 )
 
-from gui.style import hud_font, mono_font
+from gui.style import hud_font, mono_font, scroll_css
 
 from core.agents import REGISTRY
+
+
+# ── Assistant logo, for the HUD ──────────────────────────────────────────────
+# The logo picker in CustomizeOverlay persists the choice in config
+# ("assistant_logo", via memory/config_manager.py). The HUD paints it with
+# paint_assistant_logo(). The wiring is three lines in gui/hud.py
+# paintEvent, before the avatar is drawn:
+#     from gui.overlays import paint_assistant_logo
+#     if not paint_assistant_logo(p, cx, head_cy, r_head):
+#         self._avatar.paint(p, cx, head_cy, r_head, main, acc, qcol(C.BG))
+# A selected logo replaces the centrepiece; with nothing selected
+# paint_assistant_logo returns False and the existing look is unchanged.
+# The pixmap is cached by file mtime, so calling this every paint is cheap
+# and a new choice appears live, with no restart.
+_logo_pixmap_cache: dict = {}
+
+
+def assistant_logo_pixmap(size: int = 256):
+    """QPixmap of the selected assistant logo (square, `size` px), or None
+    when no logo is selected or the file is missing. Qt thread only."""
+    try:
+        from memory.config_manager import assistant_logo_path
+        path = assistant_logo_path()
+        if path is None:
+            return None
+        key = (str(path), path.stat().st_mtime, size)
+        pm = _logo_pixmap_cache.get(key)
+        if pm is None:
+            pm = QPixmap(str(path)).scaled(
+                size, size, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            _logo_pixmap_cache.clear()
+            _logo_pixmap_cache[key] = pm
+        return pm if not pm.isNull() else None
+    except Exception:
+        return None
+
+
+def paint_assistant_logo(p: QPainter, cx: float, cy: float, r: float) -> bool:
+    """Draw the selected logo centred at (cx, cy) with radius `r`.
+
+    Returns True when a logo was drawn, False when none is selected (the
+    caller keeps its existing centrepiece). Qt thread only, like all
+    painting."""
+    side = max(1, int(r * 2))
+    pm = assistant_logo_pixmap(side)
+    if pm is None:
+        return False
+    p.drawPixmap(int(cx - pm.width() / 2), int(cy - pm.height() / 2), pm)
+    return True
 
 
 class SetupOverlay(QWidget):
@@ -302,7 +352,21 @@ class CustomizeOverlay(QWidget):
                 border-radius: 6px;
             }}
         """)
-        lay = QVBoxLayout(self)
+        # The logo grid (below) makes this panel taller than its 588 px box,
+        # so the content scrolls instead of being clipped — the same pattern
+        # as the Plugin Settings overlay.
+        _scroll = QScrollArea()
+        _scroll.setWidgetResizable(True)
+        _scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _scroll.setStyleSheet(
+            "QScrollArea { background: transparent; }" + scroll_css())
+        _inner = QWidget()
+        _inner.setStyleSheet("background: transparent;")
+        _scroll.setWidget(_inner)
+        _root = QVBoxLayout(self)
+        _root.setContentsMargins(0, 0, 0, 0)
+        _root.addWidget(_scroll)
+        lay = QVBoxLayout(_inner)
         lay.setContentsMargins(24, 18, 24, 18)
         lay.setSpacing(8)
 
@@ -404,6 +468,49 @@ class CustomizeOverlay(QWidget):
         self._hex_input.textEdited.connect(self._on_hex_edited)
         lay.addWidget(self._hex_input)
 
+        # ── Assistant logo — 12 changeable logos ─────────────────────────
+        # Tap a logo to choose it; the choice is saved at once (config key
+        # "assistant_logo") and the HUD shows it. "NO LOGO" keeps the
+        # existing look, unchanged.
+        from memory.config_manager import (
+            ASSISTANT_LOGOS, assistant_logo_path, get_assistant_logo)
+        lay.addSpacing(4)
+        lay.addWidget(_lbl("ASSISTANT LOGO — tap to choose", 8,
+                            color=C.TEXT_DIM, align=Qt.AlignmentFlag.AlignLeft))
+        self._sel_logo = get_assistant_logo()
+        self._logo_btns: dict[str, QPushButton] = {}
+        _logo_grid = QGridLayout(); _logo_grid.setSpacing(6)
+        for _i, _fname in enumerate(ASSISTANT_LOGOS):
+            _b = QPushButton()
+            _b.setCheckable(True)
+            _b.setFixedSize(56, 56)
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _path = assistant_logo_path(_fname)
+            if _path is not None:
+                _b.setIcon(QIcon(QPixmap(str(_path))))
+                _b.setIconSize(QSize(48, 48))
+            _b.setToolTip(_fname[:-4].replace("_", " ").title())
+            _b.clicked.connect(lambda _=False, n=_fname: self._on_logo_pick(n))
+            self._logo_btns[_fname] = _b
+            _logo_grid.addWidget(_b, _i // 6, _i % 6)
+        lay.addLayout(_logo_grid)
+        _no_logo = QPushButton("✕  NO LOGO — default look")
+        _no_logo.setFixedHeight(26)
+        _no_logo.setFont(hud_font(8, QFont.Weight.Bold))
+        _no_logo.setCursor(Qt.CursorShape.PointingHandCursor)
+        _no_logo.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 3px; }}
+            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+        """)
+        _no_logo.clicked.connect(lambda: self._on_logo_pick(""))
+        lay.addWidget(_no_logo)
+        self._logo_preview = QLabel("")
+        self._logo_preview.setFont(hud_font(8))
+        self._logo_preview.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        lay.addWidget(self._logo_preview)
+        self._refresh_logo_btns()
+
         lay.addSpacing(6)
         btn_row = QHBoxLayout(); btn_row.setSpacing(8)
 
@@ -457,6 +564,39 @@ class CustomizeOverlay(QWidget):
                         border: 1px solid {C.BORDER}; border-radius: 3px; }}
                     QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
                 """)
+
+    # ── logo selection ─────────────────────────────────────────────────────
+    def _on_logo_pick(self, name: str):
+        """Save the logo choice at once (config key "assistant_logo")."""
+        from memory.config_manager import save_assistant_logo
+        if save_assistant_logo(name):
+            self._sel_logo = name
+        self._refresh_logo_btns()
+
+    def _refresh_logo_btns(self):
+        """Highlight the selected logo; show its name underneath."""
+        for fname, b in self._logo_btns.items():
+            on = (fname == self._sel_logo)
+            b.setChecked(on)
+            if on:
+                b.setStyleSheet(f"""
+                    QPushButton {{ background: {C.PRI_GHO}; border: 2px solid {C.PRI};
+                        border-radius: 3px; }}
+                """)
+            else:
+                b.setStyleSheet(f"""
+                    QPushButton {{ background: transparent;
+                        border: 1px solid {C.BORDER}; border-radius: 3px; }}
+                    QPushButton:hover {{ border-color: {C.BORDER_B}; }}
+                """)
+        if self._sel_logo:
+            self._logo_preview.setText(
+                f"Selected: {self._sel_logo[:-4].replace('_', ' ').title()} — "
+                f"the HUD shows this logo.")
+            self._logo_preview.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        else:
+            self._logo_preview.setText("No logo selected — the HUD keeps its default look.")
+            self._logo_preview.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
 
     # ── colour flow ──────────────────────────────────────────────────────────
     def _set_color(self, hx: str, update_wheel: bool = True, preview: bool = True):
@@ -1244,6 +1384,72 @@ class MemoryOverlay(_HudOverlay):
             scroll.setWidget(inner)
             self._lay.addWidget(scroll)
 
+        # ── Quick memories (the Settings Memory box — config "memories") ───
+        # A separate store from the facts above (memory/long_term.json):
+        # short notes saved from Settings. Searchable, one tap per item to
+        # forget, never auto-deleted.
+        from memory.config_manager import get_memories as _cm_all
+        self._lay.addSpacing(4)
+        _mhdr = QLabel("📌  QUICK MEMORIES — saved in Settings")
+        _mhdr.setFont(hud_font(10, QFont.Weight.Bold))
+        _mhdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        self._lay.addWidget(_mhdr)
+        _mcap = QLabel(f"{len(_cm_all())} saved — never auto-deleted; "
+                       f"backups in config/backups/.")
+        _mcap.setWordWrap(True)
+        _mcap.setFont(hud_font(7))
+        _mcap.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        self._lay.addWidget(_mcap)
+
+        _mrow = QHBoxLayout(); _mrow.setSpacing(6)
+        self._mem_input = QLineEdit()
+        self._mem_input.setPlaceholderText("Remember this…  (e.g. Boss likes tea at 7am)")
+        self._mem_input.setFont(hud_font(9))
+        self._mem_input.setFixedHeight(30)
+        self._mem_input.setStyleSheet(
+            f"QLineEdit {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
+            f"QLineEdit:focus {{ border: 1px solid {C.PRI}; }}")
+        _mrow.addWidget(self._mem_input, 1)
+        _madd = QPushButton("＋ ADD")
+        _madd.setFixedHeight(30)
+        _madd.setFont(hud_font(8, QFont.Weight.Bold))
+        _madd.setCursor(Qt.CursorShape.PointingHandCursor)
+        _madd.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        _madd.clicked.connect(self._on_mem_add)
+        _mrow.addWidget(_madd)
+        _mwrap = QWidget(); _mwrap.setLayout(_mrow)
+        self._lay.addWidget(_mwrap)
+
+        self._mem_search = QLineEdit()
+        self._mem_search.setPlaceholderText("🔍  Search memories…")
+        self._mem_search.setFont(hud_font(9))
+        self._mem_search.setFixedHeight(28)
+        self._mem_search.setStyleSheet(
+            f"QLineEdit {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
+            f"QLineEdit:focus {{ border: 1px solid {C.PRI}; }}")
+        self._mem_search.textChanged.connect(lambda _: self._rebuild_mem_rows())
+        self._lay.addWidget(self._mem_search)
+
+        _mscroll = QScrollArea()
+        _mscroll.setWidgetResizable(True)
+        _mscroll.setFixedHeight(150)
+        _mscroll.setStyleSheet(
+            f"QScrollArea {{ border: 1px solid {C.BORDER}; border-radius: 3px; "
+            f"background: transparent; }}")
+        _minner = QWidget()
+        self._mem_rows_lay = QVBoxLayout(_minner)
+        self._mem_rows_lay.setContentsMargins(6, 6, 6, 6)
+        self._mem_rows_lay.setSpacing(3)
+        _mscroll.setWidget(_minner)
+        self._lay.addWidget(_mscroll)
+        self._rebuild_mem_rows()
+
         close = QPushButton("CLOSE")
         close.setFixedHeight(30)
         close.setFont(hud_font(9))
@@ -1261,6 +1467,71 @@ class MemoryOverlay(_HudOverlay):
         # hint is not final until then. Harmless when the first pass already
         # got it right: _settle is idempotent.
         QTimer.singleShot(0, lambda g=before: self._settle(g))
+
+    def _rebuild_mem_rows(self):
+        """Rebuild only the quick-memory rows — not the whole panel, so the
+        search box keeps focus while typing."""
+        lay = getattr(self, "_mem_rows_lay", None)
+        if lay is None:
+            return
+        from memory.config_manager import search_memories
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+        search = getattr(self, "_mem_search", None)
+        q = (search.text().strip() if search is not None else "")
+        rows = search_memories(q)
+        if not rows:
+            empty = QLabel("No memories yet — add one above." if not q
+                           else "Nothing matches that search.")
+            empty.setFont(hud_font(8))
+            empty.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            lay.addWidget(empty)
+        for r in rows:
+            line = QHBoxLayout(); line.setSpacing(6)
+            txt = QLabel(r["text"])
+            txt.setWordWrap(True)
+            txt.setFont(hud_font(8))
+            txt.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+            line.addWidget(txt, 1)
+            meta = QLabel((r.get("created_at") or "")[:10])
+            meta.setFont(hud_font(7))
+            meta.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            line.addWidget(meta)
+            rm = QPushButton("✕")
+            rm.setFixedSize(20, 20)
+            rm.setFont(hud_font(8, QFont.Weight.Bold))
+            rm.setCursor(Qt.CursorShape.PointingHandCursor)
+            rm.setToolTip("Forget this")
+            rm.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px; }}
+                QPushButton:hover {{ color: {C.RED}; border-color: {C.RED}; }}
+            """)
+            rm.clicked.connect(
+                lambda _=False, mid=r["id"]: self._on_mem_del(mid))
+            line.addWidget(rm)
+            holder = QWidget()
+            holder.setLayout(line)
+            lay.addWidget(holder)
+        lay.addStretch()
+
+    def _on_mem_add(self):
+        from memory.config_manager import add_memory
+        text = (self._mem_input.text() or "").strip()
+        if not text:
+            return
+        add_memory(text)
+        self._mem_input.clear()
+        self._rebuild_mem_rows()
+
+    def _on_mem_del(self, mem_id: str):
+        from memory.config_manager import delete_memory
+        delete_memory(mem_id)
+        QTimer.singleShot(0, self._rebuild_mem_rows)
 
     def _forget(self, category: str, key: str):
         from memory.memory_manager import forget
@@ -1406,6 +1677,11 @@ class PluginSettingsOverlay(QWidget):
 
     _test_done = pyqtSignal(str, bool, str)   # namespace, ok, message
     _repo_done = pyqtSignal(bool, str)        # create-repo finished: ok, message
+    _muse_done = pyqtSignal(dict)             # muse-link refresh finished: payload dict
+    _catalog_done = pyqtSignal(list)          # plugin-catalog search finished: rows
+    _video_done = pyqtSignal(bool, str)       # video edit finished: ok, message
+    _browser_repo_done = pyqtSignal(bool, str)    # browser repo-create finished: ok, message
+    _browser_render_done = pyqtSignal(bool, str)  # browser Render deploy finished: ok, message
     _OW = 460
 
     def __init__(self, sections: list[dict], parent=None):
@@ -1431,6 +1707,44 @@ class PluginSettingsOverlay(QWidget):
         self._repo_create_btn: object = None
         self._repo_result: object = None
         self._repo_done.connect(self._on_repo_done)
+        self._muse_done.connect(self._on_muse_done)
+        self._catalog_done.connect(self._on_catalog_done)
+        self._video_done.connect(self._on_video_done)
+        self._browser_repo_done.connect(self._on_browser_repo_done)
+        self._browser_render_done.connect(self._on_browser_render_done)
+        self._muse_link_built = False   # built once: from a section, or below
+        self._muse_status = None
+        self._muse_counts = None
+        self._muse_last = None
+        self._muse_refresh_btn = None
+        # Settings Memory box widgets (built by _build_memory_box).
+        self._ps_mem_input = None
+        self._ps_mem_search = None
+        self._ps_mem_rows_lay = None
+        self._ps_mem_count = None
+        # Data Protection box widgets (built by _build_data_protection_box).
+        self._prot_toggle = None
+        self._prot_backups = None
+        # Plugin catalog box widgets (built by _build_plugin_catalog_box).
+        self._catalog_loader = None    # callable: (query: str) -> list[dict]
+        self._catalog_rows: list[dict] = []
+        # Video editor box widgets (built by _build_video_edit_box).
+        self._ve_path = None
+        self._ve_in = 0.0
+        self._ve_out = 0.0
+        self._ve_dur = 0.0
+        # Browser-box widgets (only built when a section declares
+        # "widget": "browser_repo" / "browser_render"); None until then.
+        self._browser_repo_name: object = None
+        self._browser_repo_desc: object = None
+        self._browser_repo_private: object = None
+        self._browser_repo_create_btn: object = None
+        self._browser_repo_result: object = None
+        self._browser_render_name: object = None
+        self._browser_render_repo: object = None
+        self._browser_render_branch: object = None
+        self._browser_render_btn: object = None
+        self._browser_render_result: object = None
 
         self._fs = (f"QLineEdit {{ background: #000d12; color: {C.TEXT}; "
                     f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
@@ -1445,26 +1759,35 @@ class PluginSettingsOverlay(QWidget):
         sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
         root.addWidget(sep)
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        form = QVBoxLayout(inner)
+        form.setContentsMargins(0, 0, 6, 0)
+        form.setSpacing(6)
         if not self._sections:
-            root.addWidget(self._lbl(
+            form.addWidget(self._lbl(
                 "No configurable plugins are installed.\nDrop a plugin that needs "
                 "settings (like the 3D-printer suite) into the plugins folder and "
                 "it will show up here.", 9, color=C.TEXT_DIM))
         else:
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QFrame.Shape.NoFrame)
-            scroll.setStyleSheet("QScrollArea { background: transparent; }")
-            inner = QWidget()
-            inner.setStyleSheet("background: transparent;")
-            form = QVBoxLayout(inner)
-            form.setContentsMargins(0, 0, 6, 0)
-            form.setSpacing(6)
             for sec in self._sections:
                 self._build_section(form, sec)
-            form.addStretch(1)
-            scroll.setWidget(inner)
-            root.addWidget(scroll, 1)
+        # Built-in boxes — always present, whatever plugins are installed:
+        # the Settings Memory box, the Muse Link live panel (unless a plugin
+        # section already built it above) and the Data Protection box.
+        self._build_memory_box(form)
+        if not self._muse_link_built:
+            self._build_muse_link_box(form)
+        self._build_data_protection_box(form)
+        self._build_plugin_catalog_box(form)
+        self._build_video_edit_box(form)
+        form.addStretch(1)
+        scroll.setWidget(inner)
+        root.addWidget(scroll, 1)
 
         # ── bottom buttons ───────────────────────────────────────────────────
         btn_row = QHBoxLayout(); btn_row.setSpacing(8)
@@ -1582,6 +1905,12 @@ class PluginSettingsOverlay(QWidget):
         # (🔗 CONNECTORS): rendered at the end of this section.
         if sec.get("widget") == "create_repo":
             self._build_create_repo_box(form)
+        if sec.get("widget") == "muse_link":
+            self._build_muse_link_box(form)
+        if sec.get("widget") == "browser_repo":
+            self._build_browser_repo_box(form)
+        if sec.get("widget") == "browser_render":
+            self._build_browser_render_box(form)
 
         line = QFrame(); line.setFrameShape(QFrame.Shape.HLine)
         line.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
@@ -1786,6 +2115,851 @@ class PluginSettingsOverlay(QWidget):
             self._repo_private.setChecked(False)
         else:
             self._set_repo_result(False, msg)
+
+
+    def set_plugin_catalog(self, loader) -> None:
+        """Coordinator wiring: loader is PluginRegistry.list_catalog
+        (assigned in main.py as ui.get_plugin_catalog, passed through
+        gui/window.py _open_plugin_settings). Triggers the initial load."""
+        self._catalog_loader = loader
+        self._on_catalog_search("")
+
+    # ── Plugin catalog section (500 entries, searchable) ──────────────
+    def _build_plugin_catalog_box(self, form: QVBoxLayout):
+        """'🧩  PLUGIN CATALOG — 500 plugins' box at the end of Plugin
+        Settings. Search-as-you-type (same QLineEdit style as
+        FeaturesOverlay._search_input), a scrollable row list (same QFrame
+        row shape as FeaturesOverlay._build_row), one ON/OFF toggle per
+        entry (same styling and save path as
+        PluginManagerOverlay._toggle). The search runs on a worker thread
+        and results arrive through _catalog_done, exactly like
+        _build_create_repo_box / _create_repo_worker + _on_repo_done:
+        only the Qt thread ever touches widgets."""
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🧩  PLUGIN CATALOG — 500 PLUGINS", 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Sob plugin ek jaigai — search koro, ON/OFF koro. Prottek-ta "
+            "ekta asol tool-er sathe jukto.", 8, color=C.TEXT_DIM))
+
+        self._catalog_search = QLineEdit()
+        self._catalog_search.setPlaceholderText("Search plugins…  jemon 'YouTube'")
+        self._catalog_search.setFont(hud_font(9))
+        self._catalog_search.setFixedHeight(30)
+        self._catalog_search.setStyleSheet(self._fs)
+        self._catalog_search.textChanged.connect(self._on_catalog_search)
+        form.addWidget(self._catalog_search)
+
+        self._catalog_count = self._lbl("", 8, color=C.TEXT_DIM)
+        form.addWidget(self._catalog_count)
+
+        self._catalog_scroll = QScrollArea()
+        self._catalog_scroll.setWidgetResizable(True)
+        self._catalog_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._catalog_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        self._catalog_list = QWidget()
+        self._catalog_list.setStyleSheet("background: transparent;")
+        self._catalog_lay = QVBoxLayout(self._catalog_list)
+        self._catalog_lay.setContentsMargins(0, 0, 6, 0)
+        self._catalog_lay.setSpacing(4)
+        self._catalog_lay.addStretch()
+        self._catalog_scroll.setWidget(self._catalog_list)
+        self._catalog_scroll.setFixedHeight(220)
+        form.addWidget(self._catalog_scroll, 1)
+
+    def _on_catalog_search(self, text: str):
+        if self._catalog_loader is None:
+            return
+        query = (text or "").strip()
+
+        def worker():
+            try:
+                rows = self._catalog_loader(query) or []
+            except Exception:
+                rows = []
+            self._catalog_done.emit(rows)   # Qt thread rebuilds the rows
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_catalog_done(self, rows: list):
+        self._catalog_rows = list(rows or [])
+        while self._catalog_lay.count():
+            item = self._catalog_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+        if not self._catalog_rows:
+            empty = QLabel("Kono plugin milche na — search bodle dekho.")
+            empty.setWordWrap(True)
+            empty.setFont(hud_font(8))
+            empty.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            self._catalog_lay.addWidget(empty)
+        for row in self._catalog_rows[:50]:   # first page only; search narrows it
+            self._catalog_lay.addWidget(self._build_catalog_row(row))
+        self._catalog_lay.addStretch()
+        n = len(self._catalog_rows)
+        self._catalog_count.setText(
+            f"Showing {min(n, 50)} of {n} plugin{'s' if n != 1 else ''}")
+
+    def _build_catalog_row(self, row: dict) -> QFrame:
+        frame = QFrame()
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: {C.PANEL2};
+                border: 1px solid {C.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+        flay = QHBoxLayout(frame)
+        flay.setContentsMargins(10, 6, 10, 6)
+        flay.setSpacing(6)
+        name = QLabel(str(row.get("name") or ""))
+        name.setFont(hud_font(9, QFont.Weight.Bold))
+        name.setStyleSheet(
+            f"color: {C.TEXT if row.get('enabled', True) else C.TEXT_DIM};"
+            " background: transparent;")
+        name.setToolTip(
+            f"{row.get('description') or ''}\nTool: {row.get('tool') or ''}"
+            f"\nTrigger: {row.get('trigger') or ''}")
+        flay.addWidget(name, 1)
+        badge = QLabel(str(row.get("tool") or ""))
+        badge.setFont(hud_font(7, QFont.Weight.Bold))
+        badge.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        flay.addWidget(badge)
+        tog = QPushButton()
+        tog.setFixedSize(52, 24)
+        tog.setFont(hud_font(7, QFont.Weight.Bold))
+        tog.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._style_catalog_toggle(tog, bool(row.get("enabled", True)))
+        tog.clicked.connect(
+            lambda _c, key=row.get("key"), b=tog: self._on_catalog_toggle(key, b))
+        flay.addWidget(tog)
+        return frame
+
+    @staticmethod
+    def _style_catalog_toggle(btn: QPushButton, enabled: bool):
+        # Same ON/OFF look as PluginManagerOverlay._style_toggle.
+        if enabled:
+            btn.setText("ON")
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #001a08; color: {C.GREEN};
+                    border: 1px solid {C.GREEN_D}; border-radius: 3px;
+                }}
+                QPushButton:hover {{ background: #002010; }}
+            """)
+        else:
+            btn.setText("OFF")
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px;
+                }}
+                QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+            """)
+
+    def _on_catalog_toggle(self, key: str, btn: QPushButton):
+        # Same save path as PluginManagerOverlay._toggle:
+        # config-file IO on the Qt thread, exactly as the existing toggle does.
+        from memory.config_manager import get_plugin_enabled, save_plugin_enabled
+        new_val = not get_plugin_enabled(key)
+        save_plugin_enabled(key, new_val)
+        self._style_catalog_toggle(btn, new_val)
+
+
+    def _build_video_edit_box(self, form: QVBoxLayout):
+        """'🎬 VIDEO EDITOR' — open a video, set in/out by clicking, Cut/Export.
+
+        The slider IS the mouse control: clicking / dragging it seeks (the
+        frame label shows that second). 'Mark In' / 'Mark Out' capture the
+        slider position as the cut points. Cut = trim in..out to a new file;
+        Export = same trim written to the chosen output path. The ffmpeg
+        call runs on a worker thread; the result comes back through
+        _video_done so only the Qt thread touches widgets.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🎬  VIDEO EDITOR — mouse diye cut koro", 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Video khulo, slider-e click kore jayga-ta khujo, Mark In / Mark Out "
+            "chapho, tarpor Cut ba Export. Prothom bar ffmpeg download hobe "
+            "(~110 MB, ekbar-i).", 8, color=C.TEXT_DIM))
+
+        open_btn = QPushButton("▸  OPEN VIDEO…")
+        open_btn.setFixedHeight(30)
+        open_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        open_btn.clicked.connect(self._on_video_open)
+        form.addWidget(open_btn)
+
+        self._ve_file_lbl = self._lbl("Kono video khola hoy ni.", 8, color=C.TEXT_DIM)
+        form.addWidget(self._ve_file_lbl)
+
+        # Clickable seek bar: clicking anywhere on it seeks to that second.
+        self._ve_slider = QSlider(Qt.Orientation.Horizontal)
+        self._ve_slider.setRange(0, 1000)
+        self._ve_slider.setEnabled(False)
+        self._ve_slider.valueChanged.connect(self._on_video_seek)
+        form.addWidget(self._ve_slider)
+
+        self._ve_pos_lbl = self._lbl("0.0s / 0.0s", 8, color=C.TEXT_DIM)
+        form.addWidget(self._ve_pos_lbl)
+
+        row = QHBoxLayout()
+        for label, slot in (("⏺  MARK IN", self._on_video_mark_in),
+                            ("⏺  MARK OUT", self._on_video_mark_out)):
+            b = QPushButton(label)
+            b.setFixedHeight(28)
+            b.setFont(hud_font(8, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(f"""
+                QPushButton {{ background: #00091a; color: {C.PRI};
+                    border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+                QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            """)
+            b.clicked.connect(slot)
+            row.addWidget(b)
+        form.addLayout(row)
+
+        self._ve_range_lbl = self._lbl("In: —   Out: —", 8, color=C.TEXT_MED)
+        form.addWidget(self._ve_range_lbl)
+
+        row2 = QHBoxLayout()
+        for label, slot in (("✂  CUT", self._on_video_cut),
+                            ("⬇  EXPORT", self._on_video_export)):
+            b = QPushButton(label)
+            b.setFixedHeight(30)
+            b.setFont(hud_font(8, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(f"""
+                QPushButton {{ background: #00091a; color: {C.PRI};
+                    border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+                QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+                QPushButton:disabled {{ color: {C.BORDER}; border-color: {C.BORDER}; }}
+            """)
+            b.clicked.connect(slot)
+            row2.addWidget(b)
+        form.addLayout(row2)
+        self._ve_cut_btn = row2.itemAt(0).widget()
+        self._ve_export_btn = row2.itemAt(1).widget()
+
+        self._ve_result = QLabel("")
+        self._ve_result.setWordWrap(True)
+        self._ve_result.setFont(hud_font(8))
+        self._ve_result.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        form.addWidget(self._ve_result)
+
+    def _set_video_result(self, ok: bool, msg: str, color: str | None = None):
+        if color is None:
+            color = C.PRI if ok else "#ff6b6b"
+        self._ve_result.setText(msg)
+        self._ve_result.setStyleSheet(f"color: {color}; background: transparent;")
+
+    def _on_video_open(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Video khulo", "",
+            "Videos (*.mp4 *.mov *.mkv *.avi *.webm);;All files (*)")
+        if not path:
+            return
+        self._ve_path = path
+        self._ve_in, self._ve_out = 0.0, 0.0
+        self._ve_file_lbl.setText(path)
+        self._ve_slider.setEnabled(True)
+        self._ve_range_lbl.setText("In: —   Out: —")
+        # Duration via core/video_edit.py probe() (ffprobe) — worker thread.
+        threading.Thread(target=self._video_probe_worker,
+                         args=(path,), daemon=True).start()
+
+    def _video_probe_worker(self, path: str):
+        try:
+            from core import video_edit as _ve
+            ok, msg = _ve.probe(path)
+            import re as _re
+            m = _re.search(r"(\d+(?:\.\d+)?)s", msg or "")
+            dur = float(m.group(1)) if m else 0.0
+        except Exception as e:
+            ok, dur, msg = False, 0.0, str(e)
+        # Hand the duration back on the Qt thread via the same signal.
+        self._video_done.emit(ok and dur > 0, f"PROBE|{dur}|{msg}")
+
+    def _on_video_seek(self, value: int):
+        if not self._ve_dur:
+            return
+        sec = value / 1000.0 * self._ve_dur
+        self._ve_pos_lbl.setText(f"{sec:.1f}s / {self._ve_dur:.1f}s")
+
+    def _on_video_mark_in(self):
+        if not self._ve_path:
+            self._set_video_result(False, "Age video khulo.")
+            return
+        self._ve_in = self._ve_slider.value() / 1000.0 * self._ve_dur
+        self._ve_range_lbl.setText(
+            f"In: {self._ve_in:.1f}s   Out: "
+            f"{self._ve_out:.1f}s" if self._ve_out else f"In: {self._ve_in:.1f}s   Out: —")
+
+    def _on_video_mark_out(self):
+        if not self._ve_path:
+            self._set_video_result(False, "Age video khulo.")
+            return
+        self._ve_out = self._ve_slider.value() / 1000.0 * self._ve_dur
+        self._ve_range_lbl.setText(f"In: {self._ve_in:.1f}s   Out: {self._ve_out:.1f}s")
+
+    def _video_out_path(self) -> str:
+        import os as _os
+        base, ext = _os.path.splitext(self._ve_path)
+        return f"{base}_cut{ext or '.mp4'}"
+
+    def _on_video_cut(self):
+        self._start_video_edit(self._video_out_path())
+
+    def _on_video_export(self):
+        from PyQt6.QtWidgets import QFileDialog
+        import os as _os
+        out, _ = QFileDialog.getSaveFileName(
+            self, "Export koro", self._video_out_path(),
+            "MP4 (*.mp4);;All files (*)")
+        if out:
+            self._start_video_edit(out)
+
+    def _start_video_edit(self, out: str):
+        if not self._ve_path:
+            self._set_video_result(False, "Age video khulo.")
+            return
+        if not self._ve_out or self._ve_out <= self._ve_in:
+            self._set_video_result(False, "In ar Out mark koro — Out In-er pore hote hobe.")
+            return
+        self._ve_cut_btn.setEnabled(False)
+        self._ve_export_btn.setEnabled(False)
+        self._set_video_result(False, "Cutting…", color=C.TEXT_DIM)
+        threading.Thread(target=self._video_edit_worker,
+                         args=(self._ve_path, self._ve_in, self._ve_out, out),
+                         daemon=True).start()
+
+    def _video_edit_worker(self, path: str, start: float, end: float, out: str):
+        try:
+            from core import video_edit as _ve
+            ok, msg = _ve.trim(path, start, end, out)
+        except Exception as e:
+            ok, msg = False, f"Cut korte parlam na: {e}"
+        self._video_done.emit(ok, msg)
+
+    def _on_video_done(self, ok: bool, msg: str):
+        if msg.startswith("PROBE|"):
+            _, dur, info = msg.split("|", 2)
+            self._ve_dur = float(dur or 0)
+            self._ve_pos_lbl.setText(f"0.0s / {self._ve_dur:.1f}s")
+            self._set_video_result(ok, info if ok else
+                                   "Video-r info pelam na — file-ta thik ache kina dekho.")
+            return
+        self._ve_cut_btn.setEnabled(True)
+        self._ve_export_btn.setEnabled(True)
+        self._set_video_result(ok, msg)
+
+
+    def _build_browser_repo_box(self, form: QVBoxLayout):
+        """'📦 CREATE REPOSITORY — BROWSER (NO TOKEN)' box.
+
+        Same shape as _build_create_repo_box but the Create button runs
+        core.browser_automation.github_new_repo on a worker thread: Mark
+        drives the user's own logged-in Chrome via the no-extension
+        Playwright/CDP driver — no GitHub token is used, asked for, or
+        shown. If the driver is not ready (no Playwright / Chrome not
+        reachable) the flow's plain message is shown in red.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl("📦  CREATE REPOSITORY — BROWSER (NO TOKEN)", 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Token lagbe na — Chrome-e github.com-e login thakle Mark "
+            "browser-ta chaliye repo banabe. Playwright install na thakle "
+            "ekhane porishkar kore bolbe.", 8, color=C.TEXT_DIM))
+
+        form.addWidget(self._lbl("REPOSITORY NAME", 8, color=C.TEXT_DIM))
+        self._browser_repo_name = QLineEdit()
+        self._browser_repo_name.setFont(hud_font(10))
+        self._browser_repo_name.setFixedHeight(30)
+        self._browser_repo_name.setStyleSheet(self._fs)
+        self._browser_repo_name.setPlaceholderText("e.g. my-new-repo")
+        form.addWidget(self._browser_repo_name)
+
+        form.addWidget(self._lbl("DESCRIPTION (OPTIONAL)", 8, color=C.TEXT_DIM))
+        self._browser_repo_desc = QLineEdit()
+        self._browser_repo_desc.setFont(hud_font(10))
+        self._browser_repo_desc.setFixedHeight(30)
+        self._browser_repo_desc.setStyleSheet(self._fs)
+        self._browser_repo_desc.setPlaceholderText("ki korbe ei repo-ta")
+        form.addWidget(self._browser_repo_desc)
+
+        self._browser_repo_private = QCheckBox("🔒  Private repo")
+        self._browser_repo_private.setFont(hud_font(9))
+        self._browser_repo_private.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._browser_repo_private.setStyleSheet(
+            f"QCheckBox {{ color: {C.TEXT_MED}; background: transparent; }}"
+            f"QCheckBox::indicator {{ border: 1px solid {C.BORDER}; "
+            f"border-radius: 2px; width: 14px; height: 14px; }}"
+            f"QCheckBox::indicator:checked {{ background: {C.PRI}; "
+            f"border-color: {C.PRI}; }}")
+        form.addWidget(self._browser_repo_private)
+
+        create_btn = QPushButton("▸  CREATE IN BROWSER")
+        create_btn.setFixedHeight(30)
+        create_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        create_btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            QPushButton:disabled {{ color: {C.BORDER}; border-color: {C.BORDER}; }}
+        """)
+        create_btn.clicked.connect(self._on_browser_create_repo)
+        form.addWidget(create_btn)
+        self._browser_repo_create_btn = create_btn
+
+        self._browser_repo_result = QLabel("")
+        self._browser_repo_result.setWordWrap(True)
+        self._browser_repo_result.setFont(hud_font(8))
+        self._browser_repo_result.setOpenExternalLinks(True)
+        self._browser_repo_result.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction)
+        self._browser_repo_result.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        form.addWidget(self._browser_repo_result)
+
+    def _set_browser_repo_result(self, ok: bool, msg: str, color: str | None = None):
+        if color is None:
+            color = C.PRI if ok else "#ff6b6b"
+        self._browser_repo_result.setText(msg)
+        self._browser_repo_result.setStyleSheet(
+            f"color: {color}; background: transparent;")
+
+    def _on_browser_create_repo(self):
+        name = (self._browser_repo_name.text() or "").strip()
+        if not name:
+            self._set_browser_repo_result(False, "Repo-r naam dao.")
+            return
+        desc = (self._browser_repo_desc.text() or "").strip()
+        private = bool(self._browser_repo_private.isChecked())
+        self._browser_repo_create_btn.setEnabled(False)
+        self._set_browser_repo_result(False, "Browser-e repo banachhi…", color=C.TEXT_DIM)
+        threading.Thread(target=self._browser_create_repo_worker,
+                         args=(name, desc, private), daemon=True).start()
+
+    def _browser_create_repo_worker(self, name: str, desc: str, private: bool):
+        try:
+            from core.browser_automation import github_new_repo
+            ok, res = github_new_repo(name, desc, private)
+        except Exception as e:
+            ok, res = False, f"Repo banate parlam na: {e}"
+        self._browser_repo_done.emit(ok, res)
+
+    def _on_browser_repo_done(self, ok: bool, msg: str):
+        self._browser_repo_create_btn.setEnabled(True)
+        if ok:
+            import re as _re
+            m = _re.search(r"https://github\.com/\S+", msg)
+            url = m.group(0) if m else ""
+            if url:
+                self._set_browser_repo_result(
+                    True, f"✅ Repo banalam: <a href=\"{url}\">{url}</a>")
+            else:
+                self._set_browser_repo_result(True, msg)
+            self._browser_repo_name.clear()
+            self._browser_repo_desc.clear()
+            self._browser_repo_private.setChecked(False)
+        else:
+            self._set_browser_repo_result(False, msg)
+
+    def _build_browser_render_box(self, form: QVBoxLayout):
+        """'🌐 DEPLOY ON RENDER — BROWSER (NO API KEY)' box.
+
+        Same worker-thread + pyqtSignal pattern as _build_create_repo_box.
+        Runs core.browser_automation.render_deploy: Mark drives the user's
+        own logged-in Chrome on dashboard.render.com via the no-extension
+        driver — no Render API key is used or asked for. If the driver is
+        not ready the flow's plain message is shown in red.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🌐  DEPLOY ON RENDER — BROWSER (NO API KEY)", 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "API key lagbe na — Chrome-e dashboard.render.com-e login thakle "
+            "Mark browser-ta chaliye service banabe ar deploy korbe.",
+            8, color=C.TEXT_DIM))
+
+        form.addWidget(self._lbl("SERVICE NAME", 8, color=C.TEXT_DIM))
+        self._browser_render_name = QLineEdit()
+        self._browser_render_name.setFont(hud_font(10))
+        self._browser_render_name.setFixedHeight(30)
+        self._browser_render_name.setStyleSheet(self._fs)
+        self._browser_render_name.setPlaceholderText("e.g. my-web-app")
+        form.addWidget(self._browser_render_name)
+
+        form.addWidget(self._lbl("GITHUB REPO URL", 8, color=C.TEXT_DIM))
+        self._browser_render_repo = QLineEdit()
+        self._browser_render_repo.setFont(hud_font(10))
+        self._browser_render_repo.setFixedHeight(30)
+        self._browser_render_repo.setStyleSheet(self._fs)
+        self._browser_render_repo.setPlaceholderText("https://github.com/owner/repo")
+        form.addWidget(self._browser_render_repo)
+
+        form.addWidget(self._lbl("BRANCH", 8, color=C.TEXT_DIM))
+        self._browser_render_branch = QLineEdit()
+        self._browser_render_branch.setFont(hud_font(10))
+        self._browser_render_branch.setFixedHeight(30)
+        self._browser_render_branch.setStyleSheet(self._fs)
+        self._browser_render_branch.setPlaceholderText("main")
+        self._browser_render_branch.setText("main")
+        form.addWidget(self._browser_render_branch)
+
+        deploy_btn = QPushButton("▸  DEPLOY IN BROWSER")
+        deploy_btn.setFixedHeight(30)
+        deploy_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        deploy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        deploy_btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            QPushButton:disabled {{ color: {C.BORDER}; border-color: {C.BORDER}; }}
+        """)
+        deploy_btn.clicked.connect(self._on_browser_render_deploy)
+        form.addWidget(deploy_btn)
+        self._browser_render_btn = deploy_btn
+
+        self._browser_render_result = QLabel("")
+        self._browser_render_result.setWordWrap(True)
+        self._browser_render_result.setFont(hud_font(8))
+        self._browser_render_result.setOpenExternalLinks(True)
+        self._browser_render_result.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction)
+        self._browser_render_result.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        form.addWidget(self._browser_render_result)
+
+    def _set_browser_render_result(self, ok: bool, msg: str, color: str | None = None):
+        if color is None:
+            color = C.PRI if ok else "#ff6b6b"
+        self._browser_render_result.setText(msg)
+        self._browser_render_result.setStyleSheet(
+            f"color: {color}; background: transparent;")
+
+    def _on_browser_render_deploy(self):
+        name = (self._browser_render_name.text() or "").strip()
+        repo = (self._browser_render_repo.text() or "").strip()
+        branch = (self._browser_render_branch.text() or "main").strip() or "main"
+        if not name or not repo:
+            self._set_browser_render_result(
+                False, "Service-er naam ar GitHub repo URL — duitoi dao.")
+            return
+        self._browser_render_btn.setEnabled(False)
+        self._set_browser_render_result(False, "Browser-e Render deploy korchi…",
+                                        color=C.TEXT_DIM)
+        threading.Thread(target=self._browser_render_worker,
+                         args=(name, repo, branch), daemon=True).start()
+
+    def _browser_render_worker(self, name: str, repo: str, branch: str):
+        try:
+            from core.browser_automation import render_deploy
+            ok, res = render_deploy(name, repo, branch)
+        except Exception as e:
+            ok, res = False, f"Render deploy korte parlam na: {e}"
+        self._browser_render_done.emit(ok, res)
+
+    def _on_browser_render_done(self, ok: bool, msg: str):
+        self._browser_render_btn.setEnabled(True)
+        if ok:
+            import re as _re
+            m = _re.search(r"https://[a-z0-9-]+\.onrender\.com", msg)
+            url = m.group(0) if m else ""
+            if url:
+                self._set_browser_render_result(
+                    True, f"✅ Deploy shuru holo: <a href=\"{url}\">{url}</a>")
+            else:
+                self._set_browser_render_result(True, msg)
+            self._browser_render_name.clear()
+            self._browser_render_repo.clear()
+            self._browser_render_branch.setText("main")
+        else:
+            self._set_browser_render_result(False, msg)
+
+
+    # ── Settings Memory box ──────────────────────────────────────────────────
+    def _build_memory_box(self, form: QVBoxLayout):
+        """'🧠 MEMORY' box — quick notes saved in Settings (config "memories").
+
+        Text field + Add button, a search field, and a scrollable list with a
+        per-item delete button. Reads/writes only through
+        memory/config_manager.py; nothing here is ever auto-deleted.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🧠  MEMORY — quick notes", 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Short things to remember — saved in Settings under 'memories'. "
+            "Searchable, one tap to forget one item, and never auto-deleted: "
+            "every save is backed up (see Data Protection below).",
+            8, color=C.TEXT_DIM))
+        self._ps_mem_count = self._lbl("", 8, color=C.TEXT_DIM)
+        form.addWidget(self._ps_mem_count)
+
+        _row = QHBoxLayout(); _row.setSpacing(6)
+        self._ps_mem_input = QLineEdit()
+        self._ps_mem_input.setPlaceholderText("Remember this…")
+        self._ps_mem_input.setFont(hud_font(10))
+        self._ps_mem_input.setFixedHeight(30)
+        self._ps_mem_input.setStyleSheet(self._fs)
+        _row.addWidget(self._ps_mem_input, 1)
+        _add = QPushButton("＋ ADD")
+        _add.setFixedHeight(30)
+        _add.setFont(hud_font(8, QFont.Weight.Bold))
+        _add.setCursor(Qt.CursorShape.PointingHandCursor)
+        _add.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        _add.clicked.connect(self._on_ps_mem_add)
+        _row.addWidget(_add)
+        _wrap = QWidget(); _wrap.setLayout(_row)
+        form.addWidget(_wrap)
+
+        self._ps_mem_search = QLineEdit()
+        self._ps_mem_search.setPlaceholderText("🔍  Search memories…")
+        self._ps_mem_search.setFont(hud_font(9))
+        self._ps_mem_search.setFixedHeight(28)
+        self._ps_mem_search.setStyleSheet(self._fs)
+        self._ps_mem_search.textChanged.connect(
+            lambda _: self._rebuild_ps_mem_rows())
+        form.addWidget(self._ps_mem_search)
+
+        _scroll = QScrollArea()
+        _scroll.setWidgetResizable(True)
+        _scroll.setFixedHeight(150)
+        _scroll.setStyleSheet(
+            f"QScrollArea {{ border: 1px solid {C.BORDER}; border-radius: 3px; "
+            f"background: transparent; }}")
+        _inner = QWidget()
+        self._ps_mem_rows_lay = QVBoxLayout(_inner)
+        self._ps_mem_rows_lay.setContentsMargins(6, 6, 6, 6)
+        self._ps_mem_rows_lay.setSpacing(3)
+        _scroll.setWidget(_inner)
+        form.addWidget(_scroll)
+        self._rebuild_ps_mem_rows()
+
+    def _rebuild_ps_mem_rows(self):
+        """Rebuild only the Memory-box rows, so search keeps focus."""
+        lay = self._ps_mem_rows_lay
+        if lay is None:
+            return
+        from memory.config_manager import get_memories, search_memories
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+        q = (self._ps_mem_search.text().strip()
+             if self._ps_mem_search is not None else "")
+        rows = search_memories(q)
+        if self._ps_mem_count is not None:
+            total = len(get_memories())
+            self._ps_mem_count.setText(
+                f"{total} saved" + (f" — {len(rows)} match" if q else ""))
+        if not rows:
+            empty = QLabel("No memories yet — add one above." if not q
+                           else "Nothing matches that search.")
+            empty.setFont(hud_font(8))
+            empty.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            lay.addWidget(empty)
+        for r in rows:
+            line = QHBoxLayout(); line.setSpacing(6)
+            txt = QLabel(r["text"])
+            txt.setWordWrap(True)
+            txt.setFont(hud_font(8))
+            txt.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+            line.addWidget(txt, 1)
+            meta = QLabel((r.get("created_at") or "")[:10])
+            meta.setFont(hud_font(7))
+            meta.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            line.addWidget(meta)
+            rm = QPushButton("✕")
+            rm.setFixedSize(20, 20)
+            rm.setFont(hud_font(8, QFont.Weight.Bold))
+            rm.setCursor(Qt.CursorShape.PointingHandCursor)
+            rm.setToolTip("Forget this")
+            rm.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px; }}
+                QPushButton:hover {{ color: {C.RED}; border-color: {C.RED}; }}
+            """)
+            rm.clicked.connect(
+                lambda _=False, mid=r["id"]: self._on_ps_mem_del(mid))
+            line.addWidget(rm)
+            holder = QWidget()
+            holder.setLayout(line)
+            lay.addWidget(holder)
+        lay.addStretch()
+
+    def _on_ps_mem_add(self):
+        from memory.config_manager import add_memory
+        text = (self._ps_mem_input.text() or "").strip()
+        if not text:
+            return
+        add_memory(text)
+        self._ps_mem_input.clear()
+        self._rebuild_ps_mem_rows()
+
+    def _on_ps_mem_del(self, mem_id: str):
+        from memory.config_manager import delete_memory
+        delete_memory(mem_id)
+        QTimer.singleShot(0, self._rebuild_ps_mem_rows)
+
+    # ── Muse Link live panel ─────────────────────────────────────────────────
+    def _build_muse_link_box(self, form: QVBoxLayout):
+        """'🌉 MUSE LINK' live panel — the Muse Bridge queue, polled live.
+
+        "Connected" means the local bridge store (config namespace
+        "muse_bridge") is readable and the queue was read just now through
+        core/muse_bridge.list_tasks() — Mark polls the Render dashboard
+        queue; there is NO persistent socket, and the panel says so.
+        Refresh runs on a worker thread; the result returns through
+        _muse_done so only the Qt thread touches widgets.
+        """
+        if self._muse_link_built:
+            return
+        self._muse_link_built = True
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🌉  MUSE LINK — Muse Connected", 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Mark ↔ Muse over the Render dashboard queue — Mark polls it, "
+            "there is no persistent socket. 'Connected' = the local bridge "
+            "store is reachable and the queue was read just now.",
+            8, color=C.TEXT_DIM))
+        self._muse_status = self._lbl("● Not polled yet", 9, color=C.TEXT_DIM)
+        form.addWidget(self._muse_status)
+        self._muse_counts = self._lbl("", 8, color=C.TEXT_MED)
+        form.addWidget(self._muse_counts)
+        self._muse_last = QLabel("")
+        self._muse_last.setWordWrap(True)
+        self._muse_last.setFont(hud_font(8))
+        self._muse_last.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        form.addWidget(self._muse_last)
+        btn = QPushButton("↻  REFRESH")
+        btn.setFixedHeight(30)
+        btn.setFont(hud_font(8, QFont.Weight.Bold))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            QPushButton:disabled {{ color: {C.BORDER}; border-color: {C.BORDER}; }}
+        """)
+        btn.clicked.connect(self._refresh_muse_link)
+        form.addWidget(btn)
+        self._muse_refresh_btn = btn
+        QTimer.singleShot(0, self._refresh_muse_link)
+
+    def _refresh_muse_link(self):
+        if self._muse_status is not None:
+            self._muse_status.setText("↻ Polling bridge…")
+            self._muse_status.setStyleSheet(
+                f"color: {C.TEXT_DIM}; background: transparent;")
+        if self._muse_refresh_btn is not None:
+            self._muse_refresh_btn.setEnabled(False)
+        threading.Thread(target=self._muse_link_worker, daemon=True).start()
+
+    def _muse_link_worker(self):
+        try:
+            from core.muse_bridge import list_tasks
+            tasks = list_tasks()
+            counts = {s: sum(1 for t in tasks if t.get("status") == s)
+                      for s in ("queued", "seen", "done")}
+            last = tasks[-1] if tasks else None
+            payload = {"ok": True, "counts": counts, "total": len(tasks),
+                       "last": last,
+                       "polled_at": time.strftime("%H:%M:%S")}
+        except Exception as e:
+            payload = {"ok": False, "error": str(e),
+                       "polled_at": time.strftime("%H:%M:%S")}
+        self._muse_done.emit(payload)
+
+    def _on_muse_done(self, payload: dict):
+        if self._muse_refresh_btn is not None:
+            self._muse_refresh_btn.setEnabled(True)
+        if not payload.get("ok"):
+            if self._muse_status is not None:
+                self._muse_status.setText(
+                    "○ Bridge unreachable — "
+                    + str(payload.get("error") or "unknown error"))
+                self._muse_status.setStyleSheet(
+                    f"color: {C.RED}; background: transparent;")
+            return
+        counts = payload.get("counts") or {}
+        total = payload.get("total", 0)
+        if self._muse_status is not None:
+            self._muse_status.setText(
+                "● Connected — bridge store reachable, last polled "
+                + str(payload.get("polled_at") or "—"))
+            self._muse_status.setStyleSheet(
+                f"color: {C.GREEN}; background: transparent;")
+        if self._muse_counts is not None:
+            self._muse_counts.setText(
+                f"{total} tasks — queued {counts.get('queued', 0)} · "
+                f"seen {counts.get('seen', 0)} · done {counts.get('done', 0)}")
+        last = payload.get("last")
+        if self._muse_last is not None:
+            if not last:
+                self._muse_last.setText("No tasks queued for Muse yet.")
+            else:
+                instr = str(last.get("instruction") or "")[:160]
+                res = str(last.get("result") or "")[:160]
+                when = str(last.get("updated_at")
+                           or last.get("created_at") or "—")
+                self._muse_last.setText(
+                    f"Last: [{last.get('status', '?')}] {instr}\n"
+                    f"Result: {res or '—'}\n{when} · {last.get('id', '')}")
+
+    # ── Data Protection box ──────────────────────────────────────────────────
+    def _build_data_protection_box(self, form: QVBoxLayout):
+        """'🛡 DATA PROTECTION' — the never-delete guard + backup status."""
+        from memory.config_manager import (
+            get_data_protection, list_config_backups)
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🛡  DATA PROTECTION — never delete", 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Every save is backed up to config/backups/ (newest 20 kept); a "
+            "corrupt or empty config is restored from the newest valid backup "
+            "automatically. With the guard ON, a bulk clear needs an explicit "
+            "confirmation — it can never happen by accident.",
+            8, color=C.TEXT_DIM))
+        self._prot_toggle = QPushButton()
+        self._prot_toggle.setCheckable(True)
+        self._prot_toggle.setChecked(get_data_protection())
+        self._prot_toggle.setFixedHeight(28)
+        self._prot_toggle.setFont(hud_font(8, QFont.Weight.Bold))
+        self._prot_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._prot_toggle.toggled.connect(self._on_protection_toggle)
+        self._style_toggle(self._prot_toggle)
+        form.addWidget(self._prot_toggle)
+        self._prot_backups = self._lbl(
+            f"Backups kept: {len(list_config_backups())} "
+            f"(newest 20, in config/backups/)",
+            8, color=C.TEXT_DIM)
+        form.addWidget(self._prot_backups)
+
+    def _on_protection_toggle(self, _checked: bool = False):
+        from memory.config_manager import (
+            list_config_backups, save_data_protection)
+        btn = self._prot_toggle
+        if btn is None:
+            return
+        save_data_protection(btn.isChecked())
+        self._style_toggle(btn)
+        if self._prot_backups is not None:
+            self._prot_backups.setText(
+                f"Backups kept: {len(list_config_backups())} "
+                f"(newest 20, in config/backups/)")
 
 
 class RemoteKeyOverlay(QWidget):
@@ -2428,12 +3602,13 @@ class JarvisLinkOverlay(QWidget):
 
 
 # ── 🔍 FEATURES registry adapter + 💬 ASK MUSE helper ───────────────────────
-# The 13,700,000-feature registry (core/feature_registry.py) landed
+# The 23,720,000-feature registry (core/feature_registry.py) landed
 # 2026-11-17 as 1,000,000 (Volume 1), grew to 3,000,000 the same day
 # (Volume 2: numbers 1,000,001-3,000,000) and to 4,000,000 with Volume 3
 # (numbers 3,000,001-4,000,000), then to 6,700,000 with Volume 4
 # (numbers 4,000,001-4,700,000) and Volume 5 (numbers 4,700,001-6,700,000),
-# and to 13,700,000 with Volume 6 (numbers 6,700,001-13,700,000;
+# and to 13,700,000 with Volume 6 (numbers 6,700,001-13,700,000),
+# and to 23,720,000 with Volume 7 (numbers 13,700,001-23,720,000;
 # combinatorial resolve/search). The adapter below
 # builds against its contract — resolve(number)->dict, search(query, limit)->
 # list[dict], list_category(cidx, offset, limit)->list[dict],
@@ -2449,7 +3624,7 @@ class JarvisLinkOverlay(QWidget):
 # computed from the registry that actually loaded, so the counter reads
 # the live total — never a hard-coded total.
 
-_MAX_FEATURE_NUMBER = 13_700_000   # run-by-number accepts 1–13,700,000
+_MAX_FEATURE_NUMBER = 23_700_000   # run-by-number accepts 1–23,720,000
 
 
 def _feat_registry():
@@ -2752,7 +3927,7 @@ class FeaturesOverlay(QWidget):
     """Floating overlay — 🔍 FEATURES: browse the feature registry.
 
     Search-as-you-type (number + name + status per hit), a category
-    dropdown (100 categories), a status filter, run-by-number (1–13,700,000;
+    dropdown (100 categories), a status filter, run-by-number (1–23,720,000;
     ▶ RUN enqueues through core/action_queue.py — the same path the HUD
     quick actions use — and shows "queued — Mark will run it"), an
     enable/disable toggle per feature, and a coverage counter from
@@ -2876,7 +4051,7 @@ class FeaturesOverlay(QWidget):
         run_row.addWidget(_lbl("RUN BY NUMBER", 8, color=C.TEXT_DIM,
                                align=Qt.AlignmentFlag.AlignLeft))
         self._num_input = QLineEdit()
-        self._num_input.setPlaceholderText("1 – 13700000")
+        self._num_input.setPlaceholderText("1 – 23720000")
         self._num_input.setFont(mono_font(9))
         self._num_input.setFixedHeight(30)
         self._num_input.setStyleSheet(f"""
@@ -2950,10 +4125,10 @@ class FeaturesOverlay(QWidget):
         try:
             n = int(raw)
         except (TypeError, ValueError):
-            self._status_lbl.setText("⚠️ Number dao — 1 theke 13700000-er modhye.")
+            self._status_lbl.setText("⚠️ Number dao — 1 theke 23720000-er modhye.")
             return
         if n < 1 or n > _MAX_FEATURE_NUMBER:
-            self._status_lbl.setText("⚠️ Number dao — 1 theke 13700000-er modhye.")
+            self._status_lbl.setText("⚠️ Number dao — 1 theke 23720000-er modhye.")
             return
         rec = _feat_resolve(n)
         if rec is None:

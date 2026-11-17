@@ -1,4 +1,4 @@
-"""plugins/jarvis_features.py — 📋 13,700,000 FEATURES: the feature registry.
+"""plugins/jarvis_features.py — 📋 23,720,000 FEATURES: the feature registry.
 
 The registry is formula-based (core/feature_registry.py over
 data/feature_structure.py): Volume 1 (100 categories x 500 targets x
@@ -10,9 +10,11 @@ Volume 4 (100 categories x 350 targets x 20 patterns = 700,000
 features, numbered 4000001-4700000) + Volume 5 (100 categories x
 1,000 targets x 20 patterns = 2,000,000 features, numbered
 4700001-6700000) + Volume 6 (100 categories x 3,500 targets x
-20 patterns = 7,000,000 features, numbered 6700001-13700000) —
-13,700,000 total, no list is stored anywhere
-(a stored 13.7M-record JSON would be ~2 GB). Each feature has a status:
+20 patterns = 7,000,000 features, numbered 6700001-13700000) +
+Volume 7 (100 categories x 5,010 targets x 20 patterns = 10,020,000
+features, numbered 13700001-23720000) —
+23,720,000 total, no list is stored anywhere
+(a stored 23.72M-record JSON would be ~2 GB). Each feature has a status:
 WORKING (built and verified in Mark-LVII), NEEDS-KEY (tool exists, needs
 the user's own account/API key in Settings), NEEDS-DEVICE (needs hardware
 Mark cannot conjure) or PLANNED (a real idea, not built yet).
@@ -23,7 +25,8 @@ so e.g. "YouTube upload" also exists as "YouTube upload for home",
 1,000 (all contextual, e.g. "YouTube upload for winter"). Volume 3:
 10 base x 50 NEW contexts = 500. Volume 4: 10 base x 35 NEW contexts
 = 350. Volume 5: 10 base x 100 NEW contexts = 1,000. Volume 6:
-10 base x 350 NEW contexts = 3,500. The first
+10 base x 350 NEW contexts = 3,500. Volume 7: 10 base x 500 NEW
+contexts + 10 plain = 5,010 (contextual first, plain last). The first
 200 numbers of each category are identical to the old 20,000-feature
 registry. Resolve by number, never by name: near-duplicate names across
 categories carry no suffix here (the PDFs may add " Plus" / " Ultra").
@@ -54,8 +57,8 @@ from pathlib import Path
 PLUGIN = {
     "name": "features",
     "description": (
-        "Search, list, show and run features from Mark's 13,700,000-feature "
-        "registry (100 categories, numbered 1-13700000, each WORKING, "
+        "Search, list, show and run features from Mark's 23,720,000-feature "
+        "registry (100 categories, numbered 1-23720000, each WORKING, "
         "NEEDS-KEY, NEEDS-DEVICE or PLANNED). Use it when the user asks "
         "about a feature by number or name, wants to browse a category, "
         "or wants to run/add a feature. Actions: 'search' (query text, "
@@ -64,7 +67,7 @@ PLUGIN = {
         "for a feature number), 'run' (run a feature by number — only "
         "WORKING or NEEDS-KEY features dispatch to their tool; PLANNED "
         "and NEEDS-DEVICE features honestly report what is missing), "
-        "'stats' (status counts). A feature number is 1-13700000."
+        "'stats' (status counts). A feature number is 1-23720000."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -86,7 +89,7 @@ PLUGIN = {
             },
             "number": {
                 "type": "STRING",
-                "description": "Feature number 1-13700000 for get / run.",
+                "description": "Feature number 1-23720000 for get / run.",
             },
             "page": {
                 "type": "STRING",
@@ -96,12 +99,12 @@ PLUGIN = {
         "required": ["action"],
     },
     "tier": "extra",
-    "brief": "Search, list, show and run features from the 13,700,000-feature registry.",
+    "brief": "Search, list, show and run features from the 23,720,000-feature registry.",
 }
 
 _REGISTRY = None  # cached core.feature_registry module (or False if missing)
 _PAGE_SIZE = 20
-_TOTAL = 13_700_000
+_TOTAL = 23_700_000
 
 
 def _registry():
@@ -121,7 +124,7 @@ def _registry():
 def _registry_missing():
     return ("Feature registry-ta ekhono build kora hoy ni — "
             "core/feature_registry.py ba data/feature_structure.py pelam na. "
-            "data/gen_features_1m.py chalale 13,700,000 feature-er registry "
+            "data/gen_features_1m.py chalale 23,720,000 feature-er registry "
             "toiri hobe.")
 
 
@@ -237,7 +240,7 @@ def _do_list(params, reg):
 def _do_get(params, reg):
     n = _parse_number(params.get("number"))
     if n is None:
-        return "Feature number dao — 1 theke 13700000-er modhye."
+        return "Feature number dao — 1 theke 23720000-er modhye."
     rec = reg.resolve(n)
     if "error" in rec:
         return f"Feature #{n}: {rec['error']}"
@@ -278,7 +281,7 @@ def _tool_runner(player):
 def _do_run(params, reg, player):
     n = _parse_number(params.get("number"))
     if n is None:
-        return "Feature number dao — 1 theke 13700000-er modhye."
+        return "Feature number dao — 1 theke 23720000-er modhye."
     rec = reg.resolve(n)
     if "error" in rec:
         return f"Feature #{n}: {rec['error']}"

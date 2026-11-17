@@ -193,6 +193,14 @@ class JarvisUI:
         self._win.get_plugin_settings = cb
 
     @property
+    def get_plugin_catalog(self):
+        return self._win.get_plugin_catalog
+
+    @get_plugin_catalog.setter
+    def get_plugin_catalog(self, cb):
+        self._win.get_plugin_catalog = cb
+
+    @property
     def on_wake_toggle(self):
         return self._win.on_wake_toggle
 
@@ -277,6 +285,26 @@ class JarvisUI:
     def show_jarvis_link(self) -> None:
         """Thread-safe: open the 📱 JARVIS LINK pairing QR overlay."""
         self._win._jarvis_link_sig.emit()
+
+    def show_agents(self) -> None:
+        """Thread-safe: open the 🤖 AGENTS live HUD overlay."""
+        self._win._agents_sig.emit()
+
+    def show_automation(self) -> None:
+        """Thread-safe: open the ⚡ AUTOMATION HUD overlay."""
+        self._win._automation_sig.emit()
+
+    def show_main_agent(self) -> None:
+        """Thread-safe: open the 🧠 MAIN AGENT master-screen HUD overlay."""
+        self._win._main_agent_sig.emit()
+
+    def show_features(self) -> None:
+        """Thread-safe: open the 🔍 FEATURES registry-browser HUD overlay."""
+        self._win._features_sig.emit()
+
+    def ask_muse(self) -> None:
+        """Thread-safe: queue Mark's current work to Muse Bridge (💬 ASK MUSE)."""
+        self._win._ask_muse_sig.emit()
 
     def show_code_job(self, job: dict) -> None:
         """Thread-safe: draw the coding agent's live progress in the panel."""

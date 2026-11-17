@@ -1,6 +1,6 @@
 """core/pattern_engines.py — the 20 PATTERN ENGINES (Phase 2).
 
-Each of the 20 patterns in the 13,700,000-feature registry
+Each of the 20 patterns in the 23,720,000-feature registry
 (data/feature_structure.py) gets one engine function here. An engine is a
 REAL working implementation that delegates to the capability that already
 exists in Mark-LVII — the automation scheduler, the agent router, the
@@ -285,7 +285,7 @@ def engine_live_dashboard(record, player=None):
             from core import feature_registry
             counts = feature_registry.counts()
             lines.append(f"Features: {counts.get('WORKING', 0)} WORKING / "
-                         f"{counts.get('total', 13700000)} total")
+                         f"{counts.get('total', 23720000)} total")
         except Exception:
             pass
         target = _target(record)
@@ -815,7 +815,7 @@ def engine_export_reports(record, player=None):
             from core import feature_registry
             counts = feature_registry.counts()
             lines.append(f"Features: {counts.get('WORKING', 0)} WORKING / "
-                         f"{counts.get('total', 13700000)} total")
+                         f"{counts.get('total', 23720000)} total")
         except Exception:
             pass
         return "\n".join(lines)
@@ -987,7 +987,7 @@ def _widget_features() -> str:
     from core import feature_registry
     counts = feature_registry.counts()
     lines = ["📋 Features widget:"]
-    lines.append(f"• Total: {counts.get('total', 13700000)}")
+    lines.append(f"• Total: {counts.get('total', 23720000)}")
     lines.append(f"• WORKING: {counts.get('WORKING', 0)} | "
                  f"NEEDS-KEY: {counts.get('NEEDS-KEY', 0)} | "
                  f"NEEDS-DEVICE: {counts.get('NEEDS-DEVICE', 0)} | "
@@ -999,7 +999,7 @@ WIDGETS = {
     "agents": ("Agents — live office panel", _widget_agents),
     "automation": ("Automation — scheduled tasks", _widget_automation),
     "main_agent": ("Main Agent — Mark status", _widget_main_agent),
-    "features": ("Features — 13,700,000 registry", _widget_features),
+    "features": ("Features — 23,720,000 registry", _widget_features),
 }
 
 

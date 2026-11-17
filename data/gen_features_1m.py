@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """data/gen_features_1m.py — generate data/feature_structure.py, the
-structure behind the formula-based 13,700,000-feature registry.
+structure behind the formula-based 23,720,000-feature registry.
 
 Source of truth (imported, never copy-pasted or hand-written):
   ~/workspace/.tmp/gen20000.py       -> CATEGORIES (100 x 10 targets), PATTERNS (20)
@@ -10,6 +10,7 @@ Source of truth (imported, never copy-pasted or hand-written):
   ~/workspace/.tmp/vol4_spec.py     -> CONTEXTS4 (35 NEW contexts) [Volume 4]
   ~/workspace/.tmp/vol5_spec.py     -> CONTEXTS5 (100 NEW contexts) [Volume 5]
   ~/workspace/.tmp/vol6_spec.py     -> CONTEXTS6 (350 NEW contexts) [Volume 6]
+  ~/workspace/.tmp/vol7_contexts.py -> CONTEXTS7 (500 contexts) [Volume 7]
   core/feature_registry.py           -> _status(), the ported Phase 1 rules
 
 Structure:
@@ -41,19 +42,29 @@ Structure:
     contexts = 3,500 (all contextual, no plain). Numbering:
     e = n - 6,700,001; c = e // 70000; t = (e % 70000) // 20; p = e % 20;
     target = base_targets[t // 350] + " for " + CONTEXTS6[t % 350].
-  Total: 13,700,000. The first 200 numbers of each category are identical
+  Volume 7 (numbers 13,700,001-23,720,000): 100 categories x 5,010 targets
+    x 20 patterns = 10,020,000. Targets per category: 10 base x 500
+    contexts = 5,000 contextual (t < 5000) + 10 plain (t = 5000..5009).
+    Numbering: e = n - 13,700,001; c = e // 100200; t = (e % 100200) // 20;
+    p = e % 20; target = base_targets[t // 500] + " for " + CONTEXTS7[t % 500]
+    (t < 5000) or the plain base target (t >= 5000). Volume 7 contexts
+    are NOT all new vs Vols 1-6 (187 overlap, accepted — features resolve
+    by number, never by name).
+  Total: 23,720,000. The first 200 numbers of each category are identical
   to the old 20,000-feature registry.
 
 Output: data/feature_structure.py — CATEGORIES, PATTERNS, CONTEXTS,
-CONTEXTS2, CONTEXTS3, CONTEXTS4, CONTEXTS5, CONTEXTS6 as Python literals
+CONTEXTS2, CONTEXTS3, CONTEXTS4, CONTEXTS5, CONTEXTS6, CONTEXTS7 as Python literals
 plus baked-in coverage COUNTS (and COUNTS_V1 / COUNTS_V2 / COUNTS_V3 /
-COUNTS_V4 / COUNTS_V5 / COUNTS_V6 per volume), computed by iterating the
+COUNTS_V4 / COUNTS_V5 / COUNTS_V6 / COUNTS_V7 per volume), computed by iterating the
 status rule over the formula space. Volume 2/3/4/5/6 counts are computed
 analytically: each (category, base target) repeats across 100 (Vol 2) /
 50 (Vol 3) / 35 (Vol 4) / 100 (Vol 5) / 350 (Vol 6) contexts x 20 patterns,
 so one _status() call per (category, base, pattern) counts 100 / 50 / 35 /
-100 / 350 features. No 13.7M-entry list is ever written: a stored
-13,700,000-record JSON would be ~2 GB. core/feature_registry.py resolves
+100 / 350 features. Volume 7 counts are computed analytically too: each
+(category, base, pattern) covers 501 features (500 contextual + 1 plain).
+No 23.72M-entry list is ever written: a stored
+23,720,000-record JSON would be ~2 GB. core/feature_registry.py resolves
 every feature from its number instead.
 
 Run:  python3 data/gen_features_1m.py        (from ~/workspace/mark-lvii)
@@ -72,6 +83,7 @@ import vol3_spec as gen3m  # noqa: E402  (CONTEXTS3)
 import vol4_spec as gen4m  # noqa: E402  (CONTEXTS4)
 import vol5_spec as gen5m  # noqa: E402  (CONTEXTS5)
 import vol6_spec as gen6m  # noqa: E402  (CONTEXTS6)
+import vol7_contexts as gen7m  # noqa: E402  (CONTEXTS7)
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -90,6 +102,7 @@ def main():
     CONTEXTS4 = gen4m.CONTEXTS4
     CONTEXTS5 = gen5m.CONTEXTS5
     CONTEXTS6 = gen6m.CONTEXTS6
+    CONTEXTS7 = gen7m.CONTEXTS7
 
     # ---- Assertions (fail loudly rather than writing a bad structure) ----
     assert len(CATEGORIES) == 100, f"categories: {len(CATEGORIES)}"
@@ -101,6 +114,10 @@ def main():
     assert len(CONTEXTS4) == 35, f"contexts4: {len(CONTEXTS4)}"
     assert len(CONTEXTS5) == 100, f"contexts5: {len(CONTEXTS5)}"
     assert len(CONTEXTS6) == 350, f"contexts6: {len(CONTEXTS6)}"
+    assert len(CONTEXTS7) == 500, f"contexts7: {len(CONTEXTS7)}"
+    # NOTE: Vol 7 contexts are NOT all new vs Vols 1-6 (187 overlap,
+    # accepted — features resolve by number, never by name), so there is
+    # deliberately NO "Volume 7 contexts must be NEW" assert here.
     assert not set(CONTEXTS2) & set(CONTEXTS), "Volume 2 contexts must be NEW"
     assert not set(CONTEXTS3) & set(CONTEXTS), "Volume 3 contexts must be NEW"
     assert not set(CONTEXTS3) & set(CONTEXTS2), "Volume 3 contexts must be NEW vs Volume 2"
@@ -121,20 +138,23 @@ def main():
         assert len([f"{b} for {c4}" for b in cat_targets for c4 in CONTEXTS4]) == 350
         assert len([f"{b} for {c5}" for b in cat_targets for c5 in CONTEXTS5]) == 1000
         assert len([f"{b} for {c6}" for b in cat_targets for c6 in CONTEXTS6]) == 3500
+        assert len([f"{b} for {c7}" for b in cat_targets for c7 in CONTEXTS7]) == 5000
     total_v1 = len(CATEGORIES) * 500 * len(PATTERNS)
     total_v2 = len(CATEGORIES) * 1000 * len(PATTERNS)
     total_v3 = len(CATEGORIES) * 500 * len(PATTERNS)
     total_v4 = len(CATEGORIES) * 350 * len(PATTERNS)
     total_v5 = len(CATEGORIES) * 1000 * len(PATTERNS)
     total_v6 = len(CATEGORIES) * 3500 * len(PATTERNS)
+    total_v7 = len(CATEGORIES) * 5010 * len(PATTERNS)
     assert total_v1 == 1_000_000, f"total v1: {total_v1}"
     assert total_v2 == 2_000_000, f"total v2: {total_v2}"
     assert total_v3 == 1_000_000, f"total v3: {total_v3}"
     assert total_v4 == 700_000, f"total v4: {total_v4}"
     assert total_v5 == 2_000_000, f"total v5: {total_v5}"
     assert total_v6 == 7_000_000, f"total v6: {total_v6}"
+    assert total_v7 == 10_020_000, f"total v7: {total_v7}"
     assert (total_v1 + total_v2 + total_v3 + total_v4 + total_v5 + total_v6
-            == 13_700_000)
+            + total_v7 == 23_720_000)
 
     # ---- Coverage counts, Volume 1: iterate the status rule over the
     # formula space. For t >= 10 the BASE target's rule applies
@@ -226,19 +246,33 @@ def main():
     counts_v6["total"] = sum(counts_v6.values())
     assert counts_v6["total"] == 7_000_000, counts_v6
 
+    # ---- Coverage counts, Volume 7: analytic, same as Volume 2/3/4/5/6
+    # but with the 10 plain targets too. Every (category, base, pattern)
+    # covers 500 contextual targets + 1 plain target = 501 features.
+    counts_v7 = {"WORKING": 0, "NEEDS-KEY": 0, "NEEDS-DEVICE": 0, "PLANNED": 0}
+    for ci, (_cat, cat_targets) in enumerate(CATEGORIES, start=1):
+        for base in cat_targets:
+            for name_tpl, _desc_tpl in PATTERNS:
+                status, _tool, _args, _req = _status(ci, base, name_tpl)
+                counts_v7[status] += 501
+        print(f"  v7 category {ci:3d} done ({_cat})", flush=True)
+    counts_v7["total"] = sum(counts_v7.values())
+    assert counts_v7["total"] == 10_020_000, counts_v7
+
     counts = {s: counts_v1[s] + counts_v2[s] + counts_v3[s]
-              + counts_v4[s] + counts_v5[s] + counts_v6[s]
+              + counts_v4[s] + counts_v5[s] + counts_v6[s] + counts_v7[s]
               for s in ("WORKING", "NEEDS-KEY", "NEEDS-DEVICE", "PLANNED")}
     counts["total"] = (counts_v1["total"] + counts_v2["total"]
                        + counts_v3["total"] + counts_v4["total"]
-                       + counts_v5["total"] + counts_v6["total"])
-    assert counts["total"] == 13_700_000, counts
+                       + counts_v5["total"] + counts_v6["total"]
+                       + counts_v7["total"])
+    assert counts["total"] == 23_720_000, counts
     assert all(s in counts for s in ("WORKING", "NEEDS-KEY", "NEEDS-DEVICE", "PLANNED"))
 
     header = (
         '"""data/feature_structure.py — GENERATED, do not hand-edit.\n'
         '\n'
-        'Structure behind the formula-based 13,700,000-feature registry\n'
+        'Structure behind the formula-based 23,720,000-feature registry\n'
         '(core/feature_registry.py resolves every feature from its number).\n'
         'Regenerate with:  python3 data/gen_features_1m.py\n'
         '\n'
@@ -247,15 +281,17 @@ def main():
         '~/workspace/.tmp/gen2000000_ext.py (CONTEXTS2, Volume 2),\n'
         '~/workspace/.tmp/vol3_spec.py (CONTEXTS3, Volume 3),\n'
         '~/workspace/.tmp/vol4_spec.py (CONTEXTS4, Volume 4),\n'
-        '~/workspace/.tmp/vol5_spec.py (CONTEXTS5, Volume 5) and\n'
-        '~/workspace/.tmp/vol6_spec.py (CONTEXTS6, Volume 6). COUNTS\n'
+        '~/workspace/.tmp/vol5_spec.py (CONTEXTS5, Volume 5),\n'
+        '~/workspace/.tmp/vol6_spec.py (CONTEXTS6, Volume 6) and\n'
+        '~/workspace/.tmp/vol7_contexts.py (CONTEXTS7, Volume 7). COUNTS\n'
         'was computed by iterating the ported Phase 1 status rule over the\n'
         'whole formula space (Volume 1: 100 categories x 500 targets x 20\n'
         'patterns; Volume 2: 100 categories x 1,000 targets x 20 patterns;\n'
         'Volume 3: 100 categories x 500 targets x 20 patterns;\n'
         'Volume 4: 100 categories x 350 targets x 20 patterns;\n'
         'Volume 5: 100 categories x 1,000 targets x 20 patterns;\n'
-        'Volume 6: 100 categories x 3,500 targets x 20 patterns).\n'
+        'Volume 6: 100 categories x 3,500 targets x 20 patterns;\n'
+        'Volume 7: 100 categories x 5,010 targets x 20 patterns).\n'
         '"""\n\n'
     )
     with open(OUT_PATH, "w", encoding="utf-8") as f:
@@ -268,24 +304,27 @@ def main():
         f.write(f"CONTEXTS4 = {CONTEXTS4!r}\n\n")
         f.write(f"CONTEXTS5 = {CONTEXTS5!r}\n\n")
         f.write(f"CONTEXTS6 = {CONTEXTS6!r}\n\n")
+        f.write(f"CONTEXTS7 = {CONTEXTS7!r}\n\n")
         f.write(f"COUNTS = {counts!r}\n\n")
         f.write(f"COUNTS_V1 = {counts_v1!r}\n\n")
         f.write(f"COUNTS_V2 = {counts_v2!r}\n\n")
         f.write(f"COUNTS_V3 = {counts_v3!r}\n\n")
         f.write(f"COUNTS_V4 = {counts_v4!r}\n\n")
         f.write(f"COUNTS_V5 = {counts_v5!r}\n\n")
-        f.write(f"COUNTS_V6 = {counts_v6!r}\n")
+        f.write(f"COUNTS_V6 = {counts_v6!r}\n\n")
+        f.write(f"COUNTS_V7 = {counts_v7!r}\n")
 
     print(f"categories: {len(CATEGORIES)}  patterns: {len(PATTERNS)}  "
           f"contexts: {len(CONTEXTS)}  contexts2: {len(CONTEXTS2)}  "
           f"contexts3: {len(CONTEXTS3)}  contexts4: {len(CONTEXTS4)}  "
           f"contexts5: {len(CONTEXTS5)}  contexts6: {len(CONTEXTS6)}  "
+          f"contexts7: {len(CONTEXTS7)}  "
           f"total: {counts['total']}")
-    print("status counts (v1 + v2 + v3 + v4 + v5 + v6 = total):")
+    print("status counts (v1 + v2 + v3 + v4 + v5 + v6 + v7 = total):")
     for s in ("WORKING", "NEEDS-KEY", "NEEDS-DEVICE", "PLANNED"):
         print(f"  {s}: {counts_v1[s]} + {counts_v2[s]} + {counts_v3[s]} "
               f"+ {counts_v4[s]} + {counts_v5[s]} + {counts_v6[s]} "
-              f"= {counts[s]}")
+              f"+ {counts_v7[s]} = {counts[s]}")
     print(f"written: {OUT_PATH} ({OUT_PATH.stat().st_size} bytes)")
 
 

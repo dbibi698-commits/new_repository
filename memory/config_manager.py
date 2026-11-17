@@ -1,10 +1,40 @@
 import functools
 import json
 import os
+import secrets
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+# ── DATA PROTECTION — NEVER DELETE ───────────────────────────────────────────
+# The user asked that saved data NEVER be lost or deleted. The scheme:
+#
+#   (a) TIMESTAMPED BACKUPS ON EVERY SAVE: before api_keys.json is replaced,
+#       the current VALID, non-empty config is copied to
+#       config/backups/config-YYYYMMDD-HHMMSS.json (a "-N" suffix is added if
+#       two saves land in the same second). The newest 20 backups are kept;
+#       older ones are pruned. Backups are made in _write_config, the single
+#       write funnel, so every setter is covered. A corrupt or empty current
+#       file is never backed up — there is nothing worth keeping in it.
+#   (b) AUTO-RESTORE ON LOAD: if api_keys.json cannot be parsed, or parses to
+#       an empty dict, load_api_keys() / _read_for_write() restore the newest
+#       VALID backup (newest by mtime; a backup that itself fails to parse is
+#       skipped) and log it. Only when NO valid backup exists does the old
+#       behaviour apply — the broken file is set aside as
+#       api_keys.json.broken-<time> and an empty dict is returned.
+#   (c) BULK-CLEAR GUARD: data_protection defaults ON (config key
+#       "data_protection"). clear_memories() — the one bulk-clear path that
+#       lives in this file — refuses to run without confirm=True while the
+#       toggle is ON, and logs the refusal; with confirm=True it clears and
+#       logs how many entries went. bulk_clear_guard(action, confirm) is the
+#       same check for bulk-clear paths elsewhere (todo / dictation /
+#       upload-queue clears in plugins/): call it before deleting, and abort
+#       when it returns False. Per-item deletes (one memory, one fact) are
+#       NOT guarded — deleting one thing you chose is not a bulk wipe.
+#   No code anywhere writes config/api_keys.json directly; everything goes
+#   through this file.
 
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -46,8 +76,119 @@ def _locked(fn):
     return wrapper
 
 
+BACKUP_KEEP = 20  # newest backups kept in config/backups/; older are pruned
+
+
+def _backup_dir() -> Path:
+    # Computed from CONFIG_DIR at call time (not a module constant) so tests
+    # can point CONFIG_DIR at a scratch folder and the backups follow it.
+    return CONFIG_DIR / "backups"
+
+
+def _backup_name() -> str:
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    base = f"config-{stamp}.json"
+    if not (_backup_dir() / base).exists():
+        return base
+    n = 1
+    while (_backup_dir() / f"config-{stamp}-{n}.json").exists():
+        n += 1
+    return f"config-{stamp}-{n}.json"
+
+
+def _backup_config() -> None:
+    """Copy the current VALID, non-empty config to config/backups/.
+
+    Called by _write_config before the file is replaced, so every save is
+    covered. A corrupt or empty current file is never backed up. Never
+    raises — a failed backup must never block the save itself."""
+    try:
+        if not CONFIG_FILE.exists():
+            return
+        try:
+            current = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(current, dict) or not current:
+            return
+        d = _backup_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / _backup_name()).write_text(
+            json.dumps(current, indent=4), encoding="utf-8")
+        _prune_backups()
+    except Exception as e:
+        print(f"[Config] backup failed: {e}")
+
+
+def _prune_backups() -> None:
+    """Keep the newest BACKUP_KEEP backups (by mtime); delete older ones."""
+    try:
+        d = _backup_dir()
+        if not d.exists():
+            return
+        files = sorted(
+            (p for p in d.glob("config-*.json") if p.is_file()),
+            key=lambda p: p.stat().st_mtime)
+        if len(files) > BACKUP_KEEP:
+            for p in files[:-BACKUP_KEEP]:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+
+def _valid_backup_files() -> list:
+    """Backup files, newest first (by mtime)."""
+    d = _backup_dir()
+    if not d.exists():
+        return []
+    return sorted(
+        (p for p in d.glob("config-*.json") if p.is_file()),
+        key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _read_backup(path: Path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) and data else None
+    except Exception:
+        return None
+
+
+def list_config_backups() -> list:
+    """Names of the timestamped backups, newest first."""
+    return [p.name for p in _valid_backup_files()]
+
+
+def _restore_newest_backup() -> dict:
+    """Write the newest VALID backup over api_keys.json.
+
+    A backup that itself fails to parse is skipped in favour of the next
+    older one. Returns the restored dict, or {} when no valid backup exists.
+    Never raises."""
+    for path in _valid_backup_files():
+        data = _read_backup(path)
+        if data is None:
+            continue
+        try:
+            ensure_config_dir()
+            tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
+            tmp.write_text(json.dumps(data, indent=4), encoding="utf-8")
+            os.replace(tmp, CONFIG_FILE)
+            print(f"[Config] api_keys.json restored from backup {path.name} "
+                  f"- data protection: nothing was lost.")
+            return data
+        except Exception as e:
+            print(f"[Config] restore from {path.name} failed: {e}")
+            continue
+    return {}
+
+
 def _write_config(data: dict) -> None:
     ensure_config_dir()
+    _backup_config()
     tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=4), encoding="utf-8")
     for attempt in range(20):
@@ -78,6 +219,9 @@ def _read_for_write() -> dict:
         except (OSError, ValueError) as e:
             last = e
             time.sleep(0.05)
+    restored = _restore_newest_backup()
+    if restored:
+        return restored
     backup = CONFIG_FILE.with_name(f"{CONFIG_FILE.name}.broken-{int(time.time())}")
     try:
         os.replace(CONFIG_FILE, backup)
@@ -103,14 +247,31 @@ def load_api_keys() -> dict:
     for attempt in range(3):
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
+            if isinstance(data, dict):
+                if data:
+                    return data
+                break  # empty dict: an empty config — try to restore below
+            return {}
         except Exception as e:
             if attempt == 2:
                 # Plain text: an emoji here raised UnicodeEncodeError on a
                 # Windows console, turning a failed read into a crash.
                 print(f"[Config] Failed to load api_keys.json: {e}")
-                return {}
-            time.sleep(0.05)
+            else:
+                time.sleep(0.05)
+    # Corrupt or empty: auto-restore the newest valid backup (never delete).
+    # Re-read under the lock first — another thread may have restored it
+    # already while this one was retrying.
+    with _lock:
+        try:
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data:
+                return data
+        except Exception:
+            pass
+        restored = _restore_newest_backup()
+        if restored:
+            return restored
     return {}
 
 def get_gemini_key() -> str | None:
@@ -666,3 +827,180 @@ def save_providers(mode: str = None, pipeline: dict = None, creds: dict = None,
 
     data["providers"] = block
     _write_config(data)
+
+# ── Quick memories ("memories" list) ─────────────────────────────────────────
+# Short things the user asks Jarvis to remember, kept in config under
+# "memories" — separate from memory/long_term.json facts (which the Memory
+# panel shows). Shown in the Settings Memory box and in the Memory panel's
+# "quick memories" section. Never auto-deleted: nothing here prunes, expires
+# or caps the list; only a per-item delete, or clear_memories(confirm=True),
+# removes anything.
+def _memories_from(data: dict) -> list:
+    raw = data.get("memories")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        text = entry.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        out.append({
+            "id": str(entry.get("id") or ""),
+            "text": text,
+            "created_at": str(entry.get("created_at") or ""),
+        })
+    return out
+
+
+def get_memories() -> list:
+    """All saved quick memories, oldest first: {"id", "text", "created_at"}."""
+    return _memories_from(load_api_keys())
+
+
+@_locked
+def add_memory(text: str) -> dict | None:
+    """Save one quick memory. Returns the stored entry, or None when blank."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    entry = {
+        "id": f"mem-{int(time.time() * 1000)}-{secrets.token_hex(3)}",
+        "text": text[:500],
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    data = _read_for_write()
+    mems = _memories_from(data)
+    mems.append(entry)
+    data["memories"] = mems
+    _write_config(data)
+    return entry
+
+
+@_locked
+def delete_memory(index_or_id) -> bool:
+    """Delete ONE quick memory by its id (str) or its position (int).
+
+    Per-item only — this is not a bulk clear, so the data-protection guard
+    does not apply. Returns False when nothing matches."""
+    data = _read_for_write()
+    mems = _memories_from(data)
+    target = None
+    if isinstance(index_or_id, int) and not isinstance(index_or_id, bool):
+        if 0 <= index_or_id < len(mems):
+            target = index_or_id
+    else:
+        want = str(index_or_id or "").strip()
+        for i, entry in enumerate(mems):
+            if entry.get("id") == want:
+                target = i
+                break
+    if target is None:
+        return False
+    del mems[target]
+    data["memories"] = mems
+    _write_config(data)
+    return True
+
+
+def search_memories(query: str) -> list:
+    """Quick memories whose text contains `query` (case-insensitive).
+
+    An empty query returns everything, oldest first."""
+    q = (query or "").strip().lower()
+    mems = get_memories()
+    if not q:
+        return mems
+    return [m for m in mems if q in m["text"].lower()]
+
+
+# ── Data-protection toggle + bulk-clear guard ────────────────────────────────
+def get_data_protection() -> bool:
+    """Whether the never-delete guard is on. Default ON."""
+    return bool(load_api_keys().get("data_protection", True))
+
+
+def save_data_protection(enabled: bool) -> None:
+    _patch_config(data_protection=bool(enabled))
+
+
+def bulk_clear_guard(action: str, confirm: bool = False) -> bool:
+    """The bulk-clear check, shared by every delete-all path.
+
+    Returns True when the clear may run: either data protection is OFF, or
+    the caller passed confirm=True (an explicit human confirmation, never a
+    default). Returns False and logs the refusal otherwise — the caller must
+    abort and delete nothing. `action` names the thing being cleared, for
+    the log line only."""
+    if get_data_protection() and not confirm:
+        print(f"[Config] Data protection ON — bulk clear of {action} refused "
+              f"without confirm=True. Nothing was deleted.")
+        return False
+    return True
+
+
+@_locked
+def clear_memories(confirm: bool = False) -> bool:
+    """Delete ALL quick memories. Guarded by bulk_clear_guard: with data
+    protection ON (the default) this returns False and deletes nothing
+    unless confirm=True is passed explicitly. Logs how many went."""
+    if not bulk_clear_guard("memories", confirm):
+        return False
+    data = _read_for_write()
+    n = len(_memories_from(data))
+    data["memories"] = []
+    _write_config(data)
+    print(f"[Config] clear_memories: {n} memories cleared (confirm=True).")
+    return True
+
+
+# ── Assistant logos ──────────────────────────────────────────────────────────
+# 12 changeable logos in assets/logos/, picked in Customize Assistant.
+# The choice is a config key, "assistant_logo"; nothing selected ("") means
+# the existing look, unchanged.
+ASSISTANT_LOGOS = (
+    "logo_01_cyan_star.png",
+    "logo_02_magenta_diamond.png",
+    "logo_03_gold_bolt.png",
+    "logo_04_green_hexagon.png",
+    "logo_05_violet_crescent.png",
+    "logo_06_orange_triangle.png",
+    "logo_07_blue_circle.png",
+    "logo_08_pink_wave.png",
+    "logo_09_teal_eye.png",
+    "logo_10_red_crown.png",
+    "logo_11_lime_infinity.png",
+    "logo_12_indigo_note.png",
+)
+
+
+def _logos_dir() -> Path:
+    # Computed at call time so tests can redirect BASE_DIR if they need to.
+    return BASE_DIR / "assets" / "logos"
+
+
+def get_assistant_logo() -> str:
+    """The selected logo filename, or "" for the default look."""
+    v = str(load_api_keys().get("assistant_logo", "") or "").strip()
+    return v if v in ASSISTANT_LOGOS else ""
+
+
+def save_assistant_logo(name: str) -> bool:
+    """Persist the logo choice. "" clears it (back to the default look).
+    An unknown filename is rejected and the stored choice is left alone."""
+    name = (name or "").strip()
+    if name and name not in ASSISTANT_LOGOS:
+        return False
+    _patch_config(assistant_logo=name)
+    return True
+
+
+def assistant_logo_path(name: str | None = None):
+    """Full path of the selected logo (or of `name`), or None when there is
+    no selection or the file is missing."""
+    n = name if name is not None else get_assistant_logo()
+    if not n:
+        return None
+    p = _logos_dir() / n
+    return p if p.is_file() else None

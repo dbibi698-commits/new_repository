@@ -80,9 +80,14 @@ from gui.overlays import (
     PluginManagerOverlay,
     PluginSettingsOverlay,
     RemoteKeyOverlay,
+    AgentsOverlay,
+    AutomationOverlay,
+    MainAgentOverlay,
+    FeaturesOverlay,
     JarvisLinkOverlay,
     SetupOverlay,
 )
+from gui.overlays import ask_muse_about_current_work
 from gui.providers_panel import (
     ProvidersOverlay,
 )
@@ -98,6 +103,11 @@ from gui.widgets import (ArcLogo, CommandFrame, DataRow, HeaderBar, HoloPanel, I
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _jarvis_link_sig = pyqtSignal()   # open the 📱 JARVIS LINK overlay from any thread
+    _agents_sig      = pyqtSignal()   # open the 🤖 AGENTS overlay from any thread
+    _automation_sig  = pyqtSignal()   # open the ⚡ AUTOMATION overlay from any thread
+    _main_agent_sig  = pyqtSignal()   # open the 🧠 MAIN AGENT overlay from any thread
+    _features_sig    = pyqtSignal()   # open the 🔍 FEATURES overlay from any thread
+    _ask_muse_sig    = pyqtSignal()   # 💬 ASK MUSE — queue current work to Muse Bridge
     _state_sig      = pyqtSignal(str)
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
     _codejob_sig    = pyqtSignal(object)     # dev_agent job state — live coding panel
@@ -148,12 +158,17 @@ class MainWindow(QMainWindow):
         self.on_remote_clicked = None   # callable: () -> (url, key) | None
         self.on_jarvis_link_clicked = None   # callable: () -> JarvisLink | None
         self._jarvis_link_overlay: JarvisLinkOverlay | None = None
+        self._agents_overlay: AgentsOverlay | None = None
+        self._automation_overlay: AutomationOverlay | None = None
+        self._main_agent_overlay: MainAgentOverlay | None = None
+        self._features_overlay: FeaturesOverlay | None = None
         self.on_interrupt      = None   # callable: () -> None — stop JARVIS mid-speech
         self.on_voice_change   = None   # callable: () -> None — rebuild session with new voice
         self.on_audio_device_change = None  # callable: () -> None — reopen audio streams
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
         self.get_plugins       = None   # callable: () -> list[dict], set by JarvisLive
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
+        self.get_plugin_catalog = None  # callable: (query: str) -> list[dict], set by JarvisLive
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
         self.on_push_to_talk   = None   # callable: (enable: bool) -> str scope
@@ -399,6 +414,11 @@ class MainWindow(QMainWindow):
 
         self._log_sig.connect(self._log.append_log)
         self._jarvis_link_sig.connect(self._open_jarvis_link)
+        self._agents_sig.connect(self._open_agents)
+        self._automation_sig.connect(self._open_automation)
+        self._main_agent_sig.connect(self._open_main_agent)
+        self._features_sig.connect(self._open_features)
+        self._ask_muse_sig.connect(self._ask_muse)
         self._state_sig.connect(self._apply_state)
         self._content_sig.connect(self._show_content)
         self._codejob_sig.connect(self._show_code_job)
@@ -1663,6 +1683,11 @@ class MainWindow(QMainWindow):
 
         _btn("◉  REMOTE CONTROL", self._open_remote, self._BTN_PRI)
         _btn("📱  JARVIS LINK", self._open_jarvis_link, self._BTN_PRI)
+        _btn("🤖  AGENTS", self._open_agents, self._BTN_PRI)
+        _btn("⚡  AUTOMATION", self._open_automation, self._BTN_PRI)
+        _btn("🧠  MAIN AGENT", self._open_main_agent, self._BTN_PRI)
+        _btn("🔍  FEATURES", self._open_features, self._BTN_PRI)
+        _btn("💬  ASK MUSE", self._ask_muse, self._BTN_PRI)
         _btn("⊞  CREATE DESKTOP SHORTCUT", self._create_desktop_shortcut)
         self._autostart_btn = _btn("◉  AUTO-START: OFF", self._toggle_autostart)
         _btn("⚙  CUSTOMISE ASSISTANT", self._open_customize)
@@ -2384,6 +2409,94 @@ class MainWindow(QMainWindow):
         self._jarvis_link_overlay = ov
         self._log.append_log("SYS: Jarvis Link QR khullo — phone diye scan koro.")
 
+    def _open_agents(self):
+        """🤖 AGENTS — 7 worker agent-er live HUD: ke ki korche, kotokkhon,
+        kotota sesh (core.agents.REGISTRY theke 1 s tick-e pore)."""
+        if self._agents_overlay:
+            self._agents_overlay._do_close()
+        cw = self.centralWidget()
+        ow, oh = AgentsOverlay._OW, AgentsOverlay._OH
+        ov = AgentsOverlay(parent=cw)
+        ov.setGeometry(
+            (cw.width() - ow) // 2,
+            (cw.height() - oh) // 2,
+            ow, oh,
+        )
+        ov.closed.connect(lambda: setattr(self, '_agents_overlay', None))
+        ov.show()
+        self._agents_overlay = ov
+        self._log.append_log("SYS: Agents HUD khullo — 7 worker live.")
+
+    def _open_automation(self):
+        """⚡ AUTOMATION — scheduled tasks: trigger → steps → condition,
+        next-run countdown, toggle / run-now / delete, recipe templates.
+        Edit lives on the dashboard page (/automation form)."""
+        if self._automation_overlay:
+            self._automation_overlay._do_close()
+        cw = self.centralWidget()
+        ow, oh = AutomationOverlay._OW, AutomationOverlay._OH
+        ov = AutomationOverlay(parent=cw)
+        ov.setGeometry(
+            (cw.width() - ow) // 2,
+            (cw.height() - oh) // 2,
+            ow, oh,
+        )
+        ov.closed.connect(lambda: setattr(self, '_automation_overlay', None))
+        ov.show()
+        self._automation_overlay = ov
+        self._log.append_log("SYS: Automation HUD khullo — scheduled tasks live.")
+
+    def _open_main_agent(self):
+        """🧠 MAIN AGENT — Mark-er master screen: Mark live status, 7 agent
+        + automation summary, phone screen, PC screen, location, quick
+        actions (queue-te jay, Mark chalabe)."""
+        if self._main_agent_overlay:
+            self._main_agent_overlay._do_close()
+        cw = self.centralWidget()
+        ow, oh = MainAgentOverlay._OW, MainAgentOverlay._OH
+        ov = MainAgentOverlay(parent=cw)
+        ov.setGeometry(
+            (cw.width() - ow) // 2,
+            (cw.height() - oh) // 2,
+            ow, oh,
+        )
+        ov.closed.connect(lambda: setattr(self, '_main_agent_overlay', None))
+        ov.show()
+        self._main_agent_overlay = ov
+        self._log.append_log("SYS: Main Agent HUD khullo — master screen live.")
+
+    def _open_features(self):
+        """🔍 FEATURES — the feature registry browser: search-as-you-type,
+        100 categories, status filter, run-by-number (queue-te jay, Mark
+        chalabe), enable/disable toggles, coverage counter."""
+        if self._features_overlay:
+            self._features_overlay._do_close()
+        cw = self.centralWidget()
+        ow, oh = FeaturesOverlay._OW, FeaturesOverlay._OH
+        ov = FeaturesOverlay(parent=cw)
+        ov.setGeometry(
+            (cw.width() - ow) // 2,
+            (cw.height() - oh) // 2,
+            ow, oh,
+        )
+        ov.closed.connect(lambda: setattr(self, '_features_overlay', None))
+        ov.show()
+        self._features_overlay = ov
+        self._log.append_log("SYS: Features HUD khullo — registry browser live.")
+
+    def _ask_muse(self):
+        """💬 ASK MUSE — queue what Mark is currently working on to Muse
+        Bridge (core/muse_bridge.create_task — fast config write, no
+        network, safe on the Qt thread). Never raises."""
+        try:
+            tid, msg = ask_muse_about_current_work()
+        except Exception as e:
+            msg = f"⚠️ Muse-ke task pathate parlam na: {e}"
+            tid = ""
+        self._log.append_log(
+            f"SYS: 💬 Muse-ke task pathano holo (id {tid})" if tid
+            else f"SYS: {msg}")
+
     # ── Auto-start ──────────────────────────────────────────────────────────────
 
     def _check_autostart(self) -> bool:
@@ -2871,6 +2984,8 @@ class MainWindow(QMainWindow):
         sections = self.get_plugin_settings() if self.get_plugin_settings else []
         cw = self.centralWidget()
         ov = PluginSettingsOverlay(sections, parent=cw)
+        if self.get_plugin_catalog:
+            ov.set_plugin_catalog(self.get_plugin_catalog)
         ow = PluginSettingsOverlay._OW
         oh = min(560, cw.height() - 16)
         ov.setGeometry(
