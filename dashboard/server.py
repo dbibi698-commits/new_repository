@@ -12,6 +12,7 @@ Install deps:  pip install fastapi "uvicorn[standard]" cryptography
 import asyncio
 import base64
 import hashlib
+import html
 import os
 import re
 import secrets
@@ -715,6 +716,194 @@ class _Throttle:
     def clear(self, who: str) -> None:
         with self._lock:
             self._fails.pop(who, None)
+
+
+# ── Facebook OAuth (Page token) ───────────────────────────────────────────────
+# The user sets up a Facebook App at developers.facebook.com and needs a PAGE
+# access token for facebook_post (core/connectors.py). Facebook rejected the
+# generic login_success.html redirect URI, so the dashboard itself is the
+# redirect target: the user pastes the callback URL below into the app's
+# "Valid OAuth Redirect URIs" and opens /facebook/login in a browser.
+#
+# Nothing here is stored server-side: the App ID / Secret come ONLY from
+# environment variables (Render env vars on the hosted dashboard), the user
+# token lives only for the length of the callback request, and the Page token
+# is shown to the user so they can copy it into Mark's Connections tab.
+# Secrets are never logged and never appear in any response. The callback URL
+# is a fixed constant — never taken from the request — so nobody can point
+# the flow at another site.
+
+_FB_GRAPH_VERSION = "v18.0"
+_FB_PUBLIC_URL    = "https://mark-lvii-dashboard.onrender.com"
+_FB_CALLBACK_URL  = _FB_PUBLIC_URL + "/api/facebook/callback"
+_FB_SCOPES        = "pages_manage_posts,pages_read_engagement,pages_show_list"
+
+
+def _fb_env() -> tuple[str, str]:
+    """Facebook App ID + App Secret, env vars only. Never logged."""
+    return ((os.environ.get("FACEBOOK_APP_ID") or "").strip(),
+            (os.environ.get("FACEBOOK_APP_SECRET") or "").strip())
+
+
+def _fb_login_url(app_id: str) -> str:
+    """The facebook.com dialog/oauth URL the Login button points at."""
+    from urllib.parse import urlencode
+    qs = urlencode({
+        "client_id": app_id,
+        "redirect_uri": _FB_CALLBACK_URL,
+        "scope": _FB_SCOPES,
+        "response_type": "code",
+    })
+    return f"https://www.facebook.com/{_FB_GRAPH_VERSION}/dialog/oauth?{qs}"
+
+
+def _fb_http_get(url: str, params: dict) -> tuple[int, dict]:
+    """One blocking GET via requests (timeout 20 s). Returns (status, json).
+
+    Kept as a tiny module-level function so tests can monkeypatch it —
+    no network in tests, no real secrets.
+    """
+    import requests
+    try:
+        r = requests.get(url, params=params, timeout=20)
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        return r.status_code, (data if isinstance(data, dict) else {})
+    except Exception as e:
+        return 0, {"error": {"message": str(e)[:200]}}
+
+
+def _fb_exchange_code(code: str, app_id: str,
+                      app_secret: str) -> tuple[str | None, str | None]:
+    """Exchange an OAuth code for a short-lived user token.
+
+    Returns (token, None) on success or (None, plain-words Bengali error).
+    The app secret is only ever sent to graph.facebook.com, never logged
+    and never returned.
+    """
+    status, data = _fb_http_get(
+        f"https://graph.facebook.com/{_FB_GRAPH_VERSION}/oauth/access_token",
+        {"client_id": app_id, "client_secret": app_secret,
+         "redirect_uri": _FB_CALLBACK_URL, "code": code})
+    tok = (data.get("access_token") or "").strip()
+    if status == 200 and tok:
+        return tok, None
+    err = data.get("error") or {}
+    msg = str(err.get("message") or "")
+    if "secret" in msg.lower() or err.get("code") in (104,):
+        return None, ("Facebook App Secret-ta thik noy — Render dashboard → "
+                      "Environment-e FACEBOOK_APP_SECRET check koro.")
+    if status == 400:
+        return None, ("Code-ta kaj korlo na — hoyto expire hoye geche. "
+                      "Abar /facebook/login theke Login chapho."
+                      + (f" ({msg})" if msg else ""))
+    return None, (f"Facebook token exchange holo na (HTTP {status})."
+                   + (f" {msg}" if msg else ""))
+
+
+def _fb_list_pages(user_token: str) -> tuple[list, str | None]:
+    """GET /me/accounts → [{"id", "name", "token"}]. Plain-words error or None."""
+    status, data = _fb_http_get(
+        f"https://graph.facebook.com/{_FB_GRAPH_VERSION}/me/accounts",
+        {"fields": "id,name,access_token", "access_token": user_token})
+    if status == 200:
+        pages = []
+        for p in data.get("data") or []:
+            pid = str(p.get("id") or "").strip()
+            name = str(p.get("name") or "").strip()
+            ptok = str(p.get("access_token") or "").strip()
+            if pid and ptok:
+                pages.append({"id": pid, "name": name or pid, "token": ptok})
+        return pages, None
+    err = data.get("error") or {}
+    msg = str(err.get("message") or "")
+    if status in (400, 401, 403):
+        return [], ("Facebook Page list ante parlam na — token-ta expire hoye "
+                    "geche hote pare. Abar Login chapho."
+                    + (f" ({msg})" if msg else ""))
+    return [], (f"Facebook Page list ante parlam na (HTTP {status})."
+                + (f" {msg}" if msg else ""))
+
+
+def _fb_page(title: str, body: str) -> str:
+    """One small dark HTML page (same look as the dashboard's other pages)."""
+    return ("<!DOCTYPE html>\n<html lang=\"bn\"><head><meta charset=\"utf-8\">\n"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+            f"<title>{html.escape(title)}</title>\n"
+            "<style>body{background:#0b0f16;color:#e6f1ff;font-family:monospace;"
+            "margin:0;padding:16px}h1{color:#22d3ee;font-size:20px;text-align:center}"
+            "p{color:#e6f1ff;font-size:14px;line-height:1.6}.box{max-width:760px;"
+            "margin:12px auto}.card{background:#131a26;border:1px solid #1f2c40;"
+            "border-radius:12px;padding:14px;margin:10px auto;max-width:760px}"
+            ".card h2{font-size:15px;margin:0 0 6px}.dim{color:#8fa3bf;font-size:12px;"
+            "text-align:center}code{background:#0b0f16;border:1px solid #1f2c40;"
+            "border-radius:6px;padding:2px 6px;word-break:break-all}"
+            "input.tok{width:100%;box-sizing:border-box;background:#0b0f16;color:#e6f1ff;"
+            "border:1px solid #1f2c40;border-radius:8px;padding:10px;font-family:monospace;"
+            "margin:6px 0}button{background:#22d3ee;color:#04222b;border:0;border-radius:8px;"
+            "padding:10px 18px;font-family:monospace;font-weight:bold;cursor:pointer}"
+            "button.ghost{background:#0b0f16;color:#22d3ee;border:1px solid #22d3ee}"
+            "a.btn{display:inline-block;background:#1877f2;color:#fff;text-decoration:none;"
+            "border-radius:8px;padding:12px 22px;font-weight:bold}</style></head><body>\n"
+            + body + "\n</body></html>")
+
+
+def _fb_login_html(app_id: str) -> str:
+    """The /facebook/login page: Login button, or the env-var setup note."""
+    if not app_id:
+        body = """<div class="box"><h1>🔵 Facebook Login — Mark-LVII</h1>
+<p>Facebook Page token pawar jonno age App ID set korte hobe.</p>
+<p>👉 <b>Render dashboard</b> → Service <b>mark-lvii-dashboard</b> → <b>Environment</b> → add koro:</p>
+<p><code>FACEBOOK_APP_ID</code> = tomar Facebook App-er App ID<br>
+<code>FACEBOOK_APP_SECRET</code> = tomar Facebook App-er App Secret</p>
+<p class="dim">App ID / Secret pabe: developers.facebook.com → tomar app → Settings → Basic.<br>
+Kokhono chat-e token/secret pathio na — sudhu Render env vars-e bosao.</p></div>"""
+        return _fb_page("Facebook Login — Mark-LVII", body)
+    url = _fb_login_url(app_id)
+    body = f"""<div class="box" style="text-align:center"><h1>🔵 Facebook Login — Mark-LVII</h1>
+<p>Facebook-e Login chaple Facebook tomar Page-er token debe. Token-ta ekhanei dekhabe —<br>
+tarpor Mark-er Connections tab-e <code>facebook_page_token</code> + <code>facebook_page_id</code> bosabe.</p>
+<p><a class="btn" href="{html.escape(url, quote=True)}">🔵 Login with Facebook</a></p>
+<p class="dim">Facebook-er "Valid OAuth Redirect URIs"-e ei URL-ta thakte hobe:<br>
+<code>{_FB_CALLBACK_URL}</code></p></div>"""
+    return _fb_page("Facebook Login — Mark-LVII", body)
+
+
+def _fb_pages_html(pages: list) -> str:
+    """The callback success page: each Page with ID + token and copy buttons."""
+    cards = []
+    for i, p in enumerate(pages):
+        name = html.escape(p["name"])
+        pid = html.escape(p["id"])
+        tok = html.escape(p["token"], quote=True)
+        cards.append(f"""<div class="card"><h2>📄 {name}</h2>
+<p>Page ID: <code>{pid}</code> <button class="ghost" onclick="copyField('pid{i}')">📋 Copy ID</button></p>
+<p>Page token:</p>
+<input class="tok" id="tok{i}" readonly value="{tok}">
+<button onclick="copyField('tok{i}')">📋 Copy token</button>
+<input type="hidden" id="pid{i}" value="{pid}"></div>""")
+    body = """<div class="box"><h1>✅ Facebook Login holo — Page token</h1>
+<p>Je Page-e post korte chao, tar <b>Page ID</b> ar <b>Page token</b> copy kore Mark-er
+Connections tab-e bosao: <code>facebook_page_id</code> + <code>facebook_page_token</code>.</p>
+<p class="dim">Token-ta ekhane kothao save kora hoy ni — ei page-ta bondho korle abar Login korte hobe.</p></div>
+""" + "\n".join(cards) + """
+<script>
+function copyField(id){ var el=document.getElementById(id); el.select();
+try{ navigator.clipboard.writeText(el.value); }catch(e){ document.execCommand('copy'); }
+var b=event.target; var t=b.textContent; b.textContent='✅ Copied!';
+setTimeout(function(){ b.textContent=t; },1500); }
+</script>"""
+    return _fb_page("Facebook Page token — Mark-LVII", body)
+
+
+def _fb_error_html(title: str, message: str) -> str:
+    """A plain-words error page with a link back to /facebook/login."""
+    body = f"""<div class="box"><h1>⚠️ {html.escape(title)}</h1>
+<p>{html.escape(message)}</p>
+<p><a class="btn" href="/facebook/login">🔄 Abar Login koro</a></p></div>"""
+    return _fb_page(title, body)
 
 
 class DashboardServer:
@@ -3019,6 +3208,53 @@ loadPc(); setInterval(loadPc, 4000);
                 pass
             finally:
                 self._clients.discard(websocket)
+
+        # ── Facebook OAuth (Page token) ─────────────────────────────────────
+        # Public routes — Facebook redirects the user's browser here with no
+        # bearer token. The App Secret is only ever sent server-side to
+        # graph.facebook.com; nothing is stored, nothing secret is returned.
+        # Handlers take only query params (no Request) so tests can call them
+        # directly without building a fake request.
+        @app.get("/facebook/login", response_class=HTMLResponse)
+        async def facebook_login_page():
+            app_id, _secret = _fb_env()
+            return HTMLResponse(_fb_login_html(app_id))
+
+        @app.get("/api/facebook/callback", response_class=HTMLResponse)
+        async def facebook_callback(code: str = "", error: str = "",
+                                    error_description: str = ""):
+            if error:
+                reason = (error_description or "").strip()
+                msg = "Facebook Login cancel kora hoyeche."
+                if reason:
+                    msg += " (" + reason + ")"
+                msg += " Page token pete abar Login chapho."
+                return HTMLResponse(_fb_error_html("Login cancel", msg))
+            if not code:
+                return HTMLResponse(_fb_error_html(
+                    "Login holo na",
+                    "Facebook theke kono code pelam na. Abar /facebook/login "
+                    "theke Login chapho."))
+            app_id, app_secret = _fb_env()
+            if not app_id or not app_secret:
+                return HTMLResponse(_fb_error_html(
+                    "App ID / Secret set kora nei",
+                    "Render dashboard → Environment-e FACEBOOK_APP_ID ar "
+                    "FACEBOOK_APP_SECRET bosao, tarpor abar Login chapho."))
+            user_token, err = await asyncio.to_thread(
+                _fb_exchange_code, code, app_id, app_secret)
+            if err:
+                return HTMLResponse(_fb_error_html("Token exchange holo na", err))
+            pages, err2 = await asyncio.to_thread(_fb_list_pages, user_token)
+            if err2:
+                return HTMLResponse(_fb_error_html("Page list pelam na", err2))
+            if not pages:
+                return HTMLResponse(_fb_error_html(
+                    "Kono Page pelam na",
+                    "Ei Facebook account-e kono Page pelam na, ba Page-er "
+                    "permission dao ni. Facebook-e Page banao / permission dao, "
+                    "tarpor abar Login chapho."))
+            return HTMLResponse(_fb_pages_html(pages))
 
         return app
 
