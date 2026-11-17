@@ -14,6 +14,7 @@ query params, no Request object).
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import unittest
@@ -31,6 +32,9 @@ _FAKE_PAGE_TOKEN = "FAKEPAGETOKEN-xxx-yyy-zzz"
 _FAKE_PAGE_ID = "987654321098765"
 
 
+_FAKE_VERIFY_TOKEN = "FAKEVERIFY-xyz-123"
+
+
 def _fake_http(status, data):
     captured = []
 
@@ -45,9 +49,11 @@ class _Base(unittest.TestCase):
     def setUp(self):
         self._orig_http = server._fb_http_get
         self._orig_env = {k: os.environ.get(k) for k in
-                          ("FACEBOOK_APP_ID", "FACEBOOK_APP_SECRET")}
+                          ("FACEBOOK_APP_ID", "FACEBOOK_APP_SECRET",
+                           "FACEBOOK_VERIFY_TOKEN")}
         os.environ["FACEBOOK_APP_ID"] = _FAKE_APP_ID
         os.environ["FACEBOOK_APP_SECRET"] = _FAKE_SECRET
+        os.environ["FACEBOOK_VERIFY_TOKEN"] = _FAKE_VERIFY_TOKEN
 
     def tearDown(self):
         server._fb_http_get = self._orig_http
@@ -57,12 +63,13 @@ class _Base(unittest.TestCase):
             else:
                 os.environ[k] = v
 
-    def _endpoint(self, path):
+    def _endpoint(self, path, method="GET"):
         srv = server.DashboardServer()
         for route in srv.app.routes:
-            if getattr(route, "path", None) == path:
+            if (getattr(route, "path", None) == path
+                    and method in (getattr(route, "methods", None) or set())):
                 return route.endpoint
-        self.fail(f"route {path} not found")
+        self.fail(f"route {method} {path} not found")
 
 
 class TestLoginUrl(_Base):
@@ -484,6 +491,81 @@ class TestInstagramRoutes(_Base):
         ep = self._endpoint("/api/instagram/callback")
         resp = asyncio.run(ep(code="CODE123"))
         self.assertIn("Kono Page pelam na", resp.body.decode())
+
+
+class TestWebhookVerify(_Base):
+    def test_match_returns_challenge(self):
+        resp = server._fb_webhook_verify("subscribe", _FAKE_VERIFY_TOKEN,
+                                         "CHALLENGE-999")
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.body, b"CHALLENGE-999")
+
+    def test_wrong_token_403(self):
+        resp = server._fb_webhook_verify("subscribe", "WRONG", "CHALLENGE-999")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_missing_env_403(self):
+        os.environ.pop("FACEBOOK_VERIFY_TOKEN", None)
+        resp = server._fb_webhook_verify("subscribe", _FAKE_VERIFY_TOKEN,
+                                         "CHALLENGE-999")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_not_a_verify_request_returns_none(self):
+        self.assertIsNone(server._fb_webhook_verify("", "", ""))
+        self.assertIsNone(server._fb_webhook_verify(
+            "unsubscribe", _FAKE_VERIFY_TOKEN, "X"))
+
+    def test_empty_challenge_403(self):
+        resp = server._fb_webhook_verify("subscribe", _FAKE_VERIFY_TOKEN, "")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_verify_token_never_in_response(self):
+        resp = server._fb_webhook_verify("subscribe", "WRONG", "CH")
+        self.assertNotIn(_FAKE_VERIFY_TOKEN.encode(), resp.body)
+
+    def test_facebook_callback_route_verify(self):
+        ep = self._endpoint("/api/facebook/callback")
+        resp = asyncio.run(ep(hub_mode="subscribe",
+                              hub_verify_token=_FAKE_VERIFY_TOKEN,
+                              hub_challenge="CH-1"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.body, b"CH-1")
+
+    def test_facebook_callback_route_verify_wrong(self):
+        ep = self._endpoint("/api/facebook/callback")
+        resp = asyncio.run(ep(hub_mode="subscribe", hub_verify_token="NOPE",
+                              hub_challenge="CH-1"))
+        self.assertEqual(resp.status_code, 403)
+
+    def test_instagram_callback_route_verify(self):
+        ep = self._endpoint("/api/instagram/callback")
+        resp = asyncio.run(ep(hub_mode="subscribe",
+                              hub_verify_token=_FAKE_VERIFY_TOKEN,
+                              hub_challenge="CH-2"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.body, b"CH-2")
+
+    def test_verify_checked_before_oauth(self):
+        # hub.mode AND a code together: verification wins, no token exchange.
+        ep = self._endpoint("/api/facebook/callback")
+        resp = asyncio.run(ep(code="CODE123", hub_mode="subscribe",
+                              hub_verify_token=_FAKE_VERIFY_TOKEN,
+                              hub_challenge="CH-3"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.body, b"CH-3")
+
+    def test_post_ack_facebook(self):
+        ep = self._endpoint("/api/facebook/callback", "POST")
+        resp = asyncio.run(ep())
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(json.loads(resp.body.decode()), {"ok": True})
+
+    def test_post_ack_instagram(self):
+        ep = self._endpoint("/api/instagram/callback", "POST")
+        resp = asyncio.run(ep())
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(json.loads(resp.body.decode()), {"ok": True})
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ from pathlib import Path
 
 _DEPS_OK = False
 try:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query
     from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, PlainTextResponse
     import uvicorn
     _DEPS_OK = True
@@ -985,6 +985,26 @@ def _fb_error_html(title: str, message: str) -> str:
 <p>{html.escape(message)}</p>
 <p><a class="btn" href="/facebook/login">🔄 Abar Login koro</a></p></div>"""
     return _fb_page(title, body)
+
+
+def _fb_webhook_verify(hub_mode: str, hub_verify_token: str,
+                       hub_challenge: str):
+    """Facebook webhook verification handshake (GET on the callback URLs).
+
+    Returns a PlainTextResponse with the challenge on a token match, a 403
+    PlainTextResponse on mismatch / missing env var, or None when this is
+    NOT a verification request (no hub.mode=subscribe) — so the caller can
+    fall through to the OAuth code flow. The expected token comes ONLY from
+    the FACEBOOK_VERIFY_TOKEN env var (the same value the user types in
+    Facebook's "Verify token" field) — never hardcoded, never logged.
+    """
+    if hub_mode != "subscribe":
+        return None
+    expected = (os.environ.get("FACEBOOK_VERIFY_TOKEN") or "").strip()
+    if (expected and hub_verify_token and hub_challenge
+            and hub_verify_token == expected):
+        return PlainTextResponse(hub_challenge, status_code=200)
+    return PlainTextResponse("Verify token mile ni.", status_code=403)
 
 
 def _ig_login_html(app_id: str) -> str:
@@ -3364,8 +3384,19 @@ loadPc(); setInterval(loadPc, 4000);
             return HTMLResponse(_fb_login_html(app_id))
 
         @app.get("/api/facebook/callback", response_class=HTMLResponse)
-        async def facebook_callback(code: str = "", error: str = "",
-                                    error_description: str = ""):
+        async def facebook_callback(
+                code: str = "", error: str = "", error_description: str = "",
+                hub_mode: str = Query("", alias="hub.mode"),
+                hub_verify_token: str = Query("", alias="hub.verify_token"),
+                hub_challenge: str = Query("", alias="hub.challenge")):
+            # Webhook verification FIRST — one URL serves both purposes:
+            # Facebook's "Verify and save" hits this URL with hub.mode, and
+            # the OAuth login flow hits it with a code. _fb_webhook_verify
+            # returns None when this is not a verification request.
+            verified = _fb_webhook_verify(hub_mode, hub_verify_token,
+                                          hub_challenge)
+            if verified is not None:
+                return verified
             if error:
                 reason = (error_description or "").strip()
                 msg = "Facebook Login cancel kora hoyeche."
@@ -3399,6 +3430,13 @@ loadPc(); setInterval(loadPc, 4000);
                     "tarpor abar Login chapho."))
             return HTMLResponse(_fb_pages_html(pages))
 
+        @app.post("/api/facebook/callback")
+        async def facebook_callback_post():
+            """Webhook events: acknowledge only. No event processing is
+            built — Facebook just needs a 200 so it does not disable the
+            subscription. Nothing is logged."""
+            return JSONResponse({"ok": True})
+
         # ── Instagram OAuth (IG business account) ─────────────────────────
         # Same Facebook App (same App ID / Secret) as the Facebook flow —
         # only the callback URL and the scope differ. instagram_post needs
@@ -3409,8 +3447,17 @@ loadPc(); setInterval(loadPc, 4000);
             return HTMLResponse(_ig_login_html(app_id))
 
         @app.get("/api/instagram/callback", response_class=HTMLResponse)
-        async def instagram_callback(code: str = "", error: str = "",
-                                     error_description: str = ""):
+        async def instagram_callback(
+                code: str = "", error: str = "", error_description: str = "",
+                hub_mode: str = Query("", alias="hub.mode"),
+                hub_verify_token: str = Query("", alias="hub.verify_token"),
+                hub_challenge: str = Query("", alias="hub.challenge")):
+            # Webhook verification FIRST — same as the Facebook callback:
+            # Instagram's "Verify and save" hits this URL with hub.mode.
+            verified = _fb_webhook_verify(hub_mode, hub_verify_token,
+                                          hub_challenge)
+            if verified is not None:
+                return verified
             if error:
                 reason = (error_description or "").strip()
                 msg = "Facebook Login cancel kora hoyeche."
@@ -3443,6 +3490,11 @@ loadPc(); setInterval(loadPc, 4000);
                     "permission dao ni. Facebook-e Page banao / permission dao, "
                     "tarpor abar Login chapho."))
             return HTMLResponse(_ig_pages_html(pages))
+
+        @app.post("/api/instagram/callback")
+        async def instagram_callback_post():
+            """Webhook events: acknowledge only, same as the Facebook one."""
+            return JSONResponse({"ok": True})
 
         return app
 
