@@ -104,6 +104,27 @@ class TestLoginPage(_Base):
         self.assertIn(server._FB_CALLBACK_URL, html)
         self.assertNotIn(_FAKE_SECRET, html)
 
+    def test_copy_boxes_with_app_id(self):
+        html = server._fb_login_html(_FAKE_APP_ID)
+        self.assertIn('id="cburl"', html)
+        self.assertIn('id="loginurl"', html)
+        self.assertIn("Copy callback URL", html)
+        self.assertIn("Copy login URL", html)
+        self.assertIn(server._FB_CALLBACK_URL, html)
+        self.assertIn(server._FB_LOGIN_PAGE_URL, html)
+        self.assertIn("copyField", html)
+        self.assertIn("execCommand", html)  # older-browser fallback
+
+    def test_copy_boxes_without_app_id(self):
+        # The callback URL is needed BEFORE the App ID is set, so the
+        # copy boxes must show in the setup-note branch too.
+        os.environ.pop("FACEBOOK_APP_ID", None)
+        html = server._fb_login_html("")
+        self.assertIn('id="cburl"', html)
+        self.assertIn('id="loginurl"', html)
+        self.assertIn("Copy callback URL", html)
+        self.assertIn(server._FB_CALLBACK_URL, html)
+
 
 class TestExchange(_Base):
     def test_success(self):

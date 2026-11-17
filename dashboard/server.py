@@ -736,7 +736,35 @@ class _Throttle:
 _FB_GRAPH_VERSION = "v18.0"
 _FB_PUBLIC_URL    = "https://mark-lvii-dashboard.onrender.com"
 _FB_CALLBACK_URL  = _FB_PUBLIC_URL + "/api/facebook/callback"
+_FB_LOGIN_PAGE_URL = _FB_PUBLIC_URL + "/facebook/login"
 _FB_SCOPES        = "pages_manage_posts,pages_read_engagement,pages_show_list"
+
+# Tiny copy-to-clipboard helper (navigator.clipboard with an execCommand
+# fallback for older browsers). Shared by the login page; the pages page
+# carries its own identical copy.
+_FB_COPY_JS = """
+<script>
+function copyField(id){ var el=document.getElementById(id); el.select();
+try{ navigator.clipboard.writeText(el.value); }catch(e){ document.execCommand('copy'); }
+var b=event.target; var t=b.textContent; b.textContent='✅ Copied!';
+setTimeout(function(){ b.textContent=t; },1500); }
+</script>"""
+
+
+def _fb_url_copy_boxes() -> str:
+    """Callback URL + login page URL, each in a visible box with a Copy button.
+
+    Shown on the login page in both branches — the user needs the callback
+    URL to paste into Facebook BEFORE the App ID env var is set.
+    """
+    return f"""<div class="card" style="text-align:left">
+<p>Callback URL — Facebook-er "Valid OAuth Redirect URIs"-e ei-ta bosao:</p>
+<input class="tok" id="cburl" readonly value="{_FB_CALLBACK_URL}">
+<button onclick="copyField('cburl')">📋 Copy callback URL</button>
+<p>Login page URL:</p>
+<input class="tok" id="loginurl" readonly value="{_FB_LOGIN_PAGE_URL}">
+<button onclick="copyField('loginurl')">📋 Copy login URL</button>
+</div>"""
 
 
 def _fb_env() -> tuple[str, str]:
@@ -851,7 +879,12 @@ def _fb_page(title: str, body: str) -> str:
 
 
 def _fb_login_html(app_id: str) -> str:
-    """The /facebook/login page: Login button, or the env-var setup note."""
+    """The /facebook/login page: Login button, or the env-var setup note.
+
+    Both branches show the callback + login URL copy boxes — the user needs
+    the callback URL to paste into Facebook before the App ID is even set.
+    """
+    boxes = _fb_url_copy_boxes() + _FB_COPY_JS
     if not app_id:
         body = """<div class="box"><h1>🔵 Facebook Login — Mark-LVII</h1>
 <p>Facebook Page token pawar jonno age App ID set korte hobe.</p>
@@ -859,15 +892,14 @@ def _fb_login_html(app_id: str) -> str:
 <p><code>FACEBOOK_APP_ID</code> = tomar Facebook App-er App ID<br>
 <code>FACEBOOK_APP_SECRET</code> = tomar Facebook App-er App Secret</p>
 <p class="dim">App ID / Secret pabe: developers.facebook.com → tomar app → Settings → Basic.<br>
-Kokhono chat-e token/secret pathio na — sudhu Render env vars-e bosao.</p></div>"""
+Kokhono chat-e token/secret pathio na — sudhu Render env vars-e bosao.</p></div>""" + boxes
         return _fb_page("Facebook Login — Mark-LVII", body)
     url = _fb_login_url(app_id)
     body = f"""<div class="box" style="text-align:center"><h1>🔵 Facebook Login — Mark-LVII</h1>
 <p>Facebook-e Login chaple Facebook tomar Page-er token debe. Token-ta ekhanei dekhabe —<br>
 tarpor Mark-er Connections tab-e <code>facebook_page_token</code> + <code>facebook_page_id</code> bosabe.</p>
 <p><a class="btn" href="{html.escape(url, quote=True)}">🔵 Login with Facebook</a></p>
-<p class="dim">Facebook-er "Valid OAuth Redirect URIs"-e ei URL-ta thakte hobe:<br>
-<code>{_FB_CALLBACK_URL}</code></p></div>"""
+<p class="dim">Facebook-er "Valid OAuth Redirect URIs"-e ei URL-ta thakte hobe — Copy chaple copy hobe.</p></div>""" + boxes
     return _fb_page("Facebook Login — Mark-LVII", body)
 
 
