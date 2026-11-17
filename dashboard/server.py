@@ -24,7 +24,7 @@ from pathlib import Path
 _DEPS_OK = False
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, PlainTextResponse
     import uvicorn
     _DEPS_OK = True
 except ImportError:
@@ -778,12 +778,26 @@ class DashboardServer:
             # missing config must never stop the dashboard from starting.
             return secrets.token_urlsafe(24)
 
+    # Extra command fields the extension understands, beyond url/selector/
+    # text. Anything not on this list is dropped, so a caller can never smuggle
+    # a credential or a file into a queued command — logins/signups come only
+    # from the extension popup's own chrome.storage.local, and upload files
+    # only from a file the user picked there.
+    _BROWSER_EXTRA_KEYS = frozenset({
+        "fields", "tab_action", "tab_id", "bookmark_action", "bookmark_id",
+        "title", "step", "delay_ms", "max_steps", "submit",
+    })
+
     def queue_browser_command(self, action: str, url: str = "",
-                              selector: str = "", text: str = "") -> str:
+                              selector: str = "", text: str = "",
+                              extra: dict | None = None) -> str:
         """Queue a command for the Chrome extension; returns its id.
 
         The queue is capped at 20 — the oldest command is dropped when it
         overflows, so a dead extension can never grow it without bound.
+        `extra` carries the whitelisted per-action fields (see
+        _BROWSER_EXTRA_KEYS): tab/bookmark sub-actions, form-fill fields,
+        autoscroll steps. Unknown keys are dropped, never queued.
         """
         cmd = {
             "id": secrets.token_urlsafe(8),
@@ -794,6 +808,9 @@ class DashboardServer:
             "created_at": time.time(),
             "delivered": False,
         }
+        for key, value in (extra or {}).items():
+            if key in self._BROWSER_EXTRA_KEYS:
+                cmd[key] = value
         self._browser_commands.append(cmd)
         while len(self._browser_commands) > 20:
             old = self._browser_commands.pop(0)
@@ -1133,11 +1150,14 @@ class DashboardServer:
             if not action:
                 return JSONResponse({"ok": False, "error": "action required"},
                                     status_code=400)
+            extra = {k: body.get(k) for k in self._BROWSER_EXTRA_KEYS
+                     if body.get(k) is not None}
             cmd_id = self.queue_browser_command(
                 action,
                 str(body.get("url") or ""),
                 str(body.get("selector") or ""),
                 str(body.get("text") or ""),
+                extra,
             )
             return JSONResponse({"ok": True, "id": cmd_id})
 
@@ -1179,6 +1199,22 @@ class DashboardServer:
                 ev.set()
             return JSONResponse({"ok": True})
 
+        @app.get("/api/browser/result/{cmd_id}")
+        async def browser_result_get(req: Request, cmd_id: str):
+            # Lets a caller that queued a command over HTTP (no in-process
+            # handle on this server) poll for the extension's answer instead
+            # of waiting blind. Same browser-token auth as the other
+            # extension endpoints; "pending" while nothing has arrived yet.
+            if not _browser_auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            res = self._browser_results.get(cmd_id or "")
+            if res is None:
+                if cmd_id in self._browser_events:
+                    return JSONResponse({"ok": False, "error": "pending"})
+                return JSONResponse({"ok": False, "error": "unknown command id"},
+                                    status_code=404)
+            return JSONResponse({"ok": True, "result": res})
+
         @app.get("/api/browser/status")
         async def browser_status(req: Request):
             if not (_browser_auth(req) or _auth(req)):
@@ -1192,6 +1228,114 @@ class DashboardServer:
             return JSONResponse({"ok": True, "connected": connected,
                                  "queued": queued,
                                  "results": len(self._browser_results)})
+
+        # ── Meta webhooks: WhatsApp + Instagram auto-reply ─────────────────
+        # Meta calls these, NOT the Chrome extension and NOT a logged-in user,
+        # so they must NOT require the browser token or a bearer token. Auth
+        # is the hub.verify_token check on GET (Meta's own subscription
+        # handshake) — the token is the one the user made up in Settings and
+        # pasted into their Meta app. No secret is ever logged here, and a
+        # bad payload is answered 200 with a short note, never a crash:
+        # Meta retries failed deliveries, so a 500 would spam the endpoint.
+        # The dashboard (Render URL or the PC) must be reachable for Meta
+        # to deliver events at all — Mark cannot register these URLs in
+        # Meta for the user; they paste them into their Meta app themselves:
+        #   https://mark-lvii-dashboard.onrender.com/webhooks/whatsapp
+        #   https://mark-lvii-dashboard.onrender.com/webhooks/instagram
+
+        def _webhook_verify(req: Request, platform: str):
+            """Meta subscription check. Returns the challenge as plain text
+            on a match, else 403. The expected token comes from
+            plugin_config["autoreply"]; when none is set, nothing verifies."""
+            try:
+                from core.autoreply import get_config as _ar_cfg
+                expected = str(_ar_cfg().get(f"{platform}_verify_token", "")
+                               or "").strip()
+            except Exception:
+                expected = ""
+            if platform == "facebook" and not expected:
+                try:
+                    from memory.config_manager import get_plugin_config as _gpc
+                    expected = str((_gpc("cat05_social") or {}).get(
+                        "facebook_verify_token", "") or "").strip()
+                except Exception:
+                    expected = ""
+            qp = req.query_params
+            mode = (qp.get("hub.mode") or "").strip()
+            token = (qp.get("hub.verify_token") or "").strip()
+            challenge = (qp.get("hub.challenge") or "").strip()
+            if (mode == "subscribe" and challenge and expected
+                    and token == expected):
+                return PlainTextResponse(challenge, status_code=200)
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+        async def _webhook_receive(req: Request, platform: str):
+            """Parse a Meta event body and hand each text message to the
+            auto-reply engine (in a thread — sending is a blocking HTTP
+            call). Always 200 after logging a short count; never raises."""
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"ok": True, "note": "not JSON, ignored"})
+            try:
+                from core import autoreply as _ar
+                if platform == "whatsapp":
+                    messages = _ar.extract_whatsapp_messages(body)
+                elif platform == "instagram":
+                    messages = _ar.extract_instagram_messages(body)
+                else:
+                    messages = []
+            except Exception:
+                messages = []
+            if platform == "facebook":
+                try:
+                    from core import cat05_social as _c05
+                    messages = _c05.extract_facebook_messages(body)
+                except Exception:
+                    messages = []
+            replied = 0
+            for sender_id, text in messages:
+                try:
+                    if platform == "facebook":
+                        from core import cat05_social as _c05
+                        result = await asyncio.to_thread(
+                            _c05.handle_facebook_incoming, sender_id, text)
+                    else:
+                        # to_thread: handle_incoming does blocking requests.
+                        result = await asyncio.to_thread(
+                            _ar.handle_incoming, platform, sender_id, text)
+                    if result not in ("disabled", "no reply"):
+                        replied += 1
+                except Exception:
+                    pass
+            print(f"[Dashboard] webhook {platform}: {len(messages)} message(s), "
+                  f"{replied} replie(s) sent.")
+            return JSONResponse({"ok": True, "received": len(messages),
+                                 "replied": replied})
+
+        @app.get("/webhooks/whatsapp")
+        async def whatsapp_webhook_get(req: Request):
+            return _webhook_verify(req, "whatsapp")
+
+        @app.post("/webhooks/whatsapp")
+        async def whatsapp_webhook_post(req: Request):
+            return await _webhook_receive(req, "whatsapp")
+
+        @app.get("/webhooks/instagram")
+        async def instagram_webhook_get(req: Request):
+            return _webhook_verify(req, "instagram")
+
+        @app.post("/webhooks/instagram")
+        async def instagram_webhook_post(req: Request):
+            return await _webhook_receive(req, "instagram")
+
+        @app.get("/webhooks/facebook")
+        async def facebook_webhook_get(req: Request):
+            return _webhook_verify(req, "facebook")
+
+        @app.post("/webhooks/facebook")
+        async def facebook_webhook_post(req: Request):
+            return await _webhook_receive(req, "facebook")
 
         @app.post("/api/wake")
         async def wake_ep(req: Request):
@@ -1322,6 +1466,38 @@ class DashboardServer:
                 return JSONResponse({"paired": False, "running": False,
                                      "error": str(e)[:120]})
 
+        @app.get("/api/agents")
+        async def agents_status(req: Request):
+            """🤖 Agents — live status of the 7 worker agents.
+
+            Same auth as /api/jarvis-link: Bearer token, 401 without it.
+            Returns {"agents": [...]} from core.agents.REGISTRY.snapshot().
+            Never raises — a registry failure returns an empty list + error.
+            """
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core.agents import REGISTRY
+                return JSONResponse({"agents": REGISTRY.snapshot()})
+            except Exception as e:
+                return JSONResponse({"agents": [],
+                                     "error": str(e)[:120]})
+
+        @app.get("/api/privacy")
+        async def privacy_api(req: Request):
+            """🔒 Privacy — presence-only inventory of saved keys/tokens and
+            where data goes (core.cat09_security.privacy_summary). Values
+            are never read into the output. Bearer auth like /api/agents.
+            Never raises."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core.cat09_security import privacy_summary as _ps
+                return JSONResponse(_ps())
+            except Exception as e:
+                return JSONResponse({"keys": [], "destinations": [],
+                                     "error": str(e)[:120]})
+
         @app.get("/api/phone-screen")
         async def phone_screen_image(req: Request, token: str = ""):
             """Latest phone screenshot as a JPEG (404 when none fetched yet).
@@ -1408,6 +1584,1401 @@ async function refreshNow(){
 load(); setInterval(load, 4000);
 </script></body></html>""".replace("__TOK__", tok)
             return HTMLResponse(html)
+
+        @app.get("/agents", response_class=HTMLResponse)
+        async def agents_page(req: Request, token: str = ""):
+            """🤖 Agents — live view of the 7 worker agents.
+
+            Same pattern as /phone-screen: auth via ?token= query param
+            (browser navigations can't send an Authorization header), then
+            the page re-polls /api/agents with the Bearer token every 2 s.
+            Mark is the parent; the 7 workers below do the jobs.
+            """
+            if not _valid(token.strip()):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            tok = token.strip().replace('"', "")
+            html = """<!DOCTYPE html>
+<html lang="bn"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🤖 Agents — Mark-LVII</title>
+<style>
+body{background:#0b0f16;color:#e6f1ff;font-family:monospace;margin:0;padding:16px}
+h1{color:#22d3ee;font-size:20px;text-align:center}
+p.sub{color:#8fa3bf;font-size:13px;text-align:center}
+#st{color:#4ade80;text-align:center;font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;max-width:900px;margin:16px auto}
+.card{background:#131a26;border:1px solid #1f2c40;border-radius:12px;padding:12px}
+.card.off{opacity:.55}
+.card h2{font-size:15px;margin:0 0 4px}
+.card .job{color:#8fa3bf;font-size:12px;margin:0 0 8px}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:bold}
+.badge.idle{background:#334155;color:#e2e8f0}
+.badge.working{background:#0ea5e9;color:#04222b}
+.badge.done{background:#22c55e;color:#052e16}
+.badge.error{background:#ef4444;color:#fff}
+.task{font-size:13px;margin:8px 0;color:#e6f1ff;word-break:break-word}
+.meta{font-size:12px;color:#8fa3bf}
+.bar{height:8px;background:#1f2c40;border-radius:999px;overflow:hidden;margin:6px 0}
+.bar i{display:block;height:100%;background:#22d3ee}
+</style></head><body>
+<h1>🤖 Agents — 7 worker agents</h1>
+<p class="sub">Mark (parent) kotha bole — ei 7 worker kaj kore. Prottek 2 sec-e update hoy.</p>
+<p id="st">Loading…</p>
+<div class="grid" id="grid"></div>
+<script>
+const TOK = "__TOK__";
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+async function load(){
+  try {
+    const r = await fetch('/api/agents', {headers:{'Authorization':'Bearer '+TOK}});
+    if(!r.ok){ document.getElementById('st').textContent = '⛔ Unauthorized — notun QR/token diye abar kholo.'; return; }
+    const d = await r.json();
+    const list = d.agents || [];
+    document.getElementById('st').textContent = '✅ '+new Date().toLocaleTimeString()+' — '+list.length+' agent';
+    document.getElementById('grid').innerHTML = list.map(function(a){
+      const task = a.current_task ? esc(a.current_task) : 'kono kaj nei';
+      return '<div class="card'+(a.enabled===false?' off':'')+'">'
+        + '<h2>'+esc(a.icon)+' '+esc(a.name)+'</h2>'
+        + '<p class="job">'+esc(a.job)+'</p>'
+        + '<span class="badge '+esc(a.status)+'">'+esc(a.status)+(a.enabled===false?' — OFF':'')+'</span>'
+        + '<p class="task">'+task+'</p>'
+        + '<div class="bar"><i style="width:'+Math.max(0,Math.min(100,Number(a.progress)||0))+'%"></i></div>'
+        + '<p class="meta">'+(Number(a.progress)||0)+'% &middot; '+(Number(a.elapsed_s)||0)+'s &middot; done: '+(Number(a.completed_count)||0)+'</p>'
+        + '</div>';
+    }).join('');
+  } catch(e){
+    document.getElementById('st').textContent = '⏳ Server-e pouchate parlam na — ektu wait koro.';
+  }
+}
+load(); setInterval(load, 2000);
+</script></body></html>""".replace("__TOK__", tok)
+            return HTMLResponse(html)
+
+        # ── 🔍 FEATURES registry (dashboard) ─────────────────────────────
+        # Qt-free copy of the adapter in gui/overlays.py: prefers
+        # core/feature_registry (contract: resolve/search/list_category/
+        # counts/set_enabled/is_enabled over 1–13,700,000; landed
+        # 2026-11-17, verified live), else the built 20,000-feature JSON
+        # registry (data/features.json via plugins/jarvis_features).
+        # Toggles fall back to config plugin_config["features"]["disabled"].
+
+        def _feat_registry():
+            try:
+                import core.feature_registry as _fr
+                return _fr
+            except Exception:
+                return None
+
+        def _feat_records():
+            try:
+                from plugins import jarvis_features as _jf
+                return _jf._load_registry()
+            except Exception:
+                return [], {}
+
+        def _feat_disabled_numbers():
+            try:
+                from memory.config_manager import get_plugin_config
+                raw = (get_plugin_config("features") or {}).get("disabled", []) or []
+                return {int(n) for n in raw if str(n).isdigit()}
+            except Exception:
+                return set()
+
+        def _feat_is_enabled(number):
+            try:
+                n = int(number)
+            except (TypeError, ValueError):
+                return True
+            fr = _feat_registry()
+            if fr is not None and hasattr(fr, "is_enabled"):
+                try:
+                    return bool(fr.is_enabled(n))
+                except Exception:
+                    pass
+            return n not in _feat_disabled_numbers()
+
+        def _feat_set_enabled(number, on):
+            try:
+                n = int(number)
+            except (TypeError, ValueError):
+                return False
+            fr = _feat_registry()
+            if fr is not None and hasattr(fr, "set_enabled"):
+                try:
+                    fr.set_enabled(n, bool(on))
+                    return True
+                except Exception:
+                    pass
+            try:
+                from memory.config_manager import get_plugin_config, save_plugin_config
+                disabled = _feat_disabled_numbers()
+                if on:
+                    disabled.discard(n)
+                else:
+                    disabled.add(n)
+                save_plugin_config("features", {"disabled": sorted(disabled)})
+                return True
+            except Exception:
+                return False
+
+        def _feat_pub(rec):
+            try:
+                rec = dict(rec or {})
+                n = int(rec.get("number") or 0)
+                return {
+                    "number": n,
+                    "volume": int(rec.get("volume") or 1),
+                    "name": str(rec.get("name") or f"Feature #{n}"),
+                    "category": str(rec.get("category") or ""),
+                    "category_index": int(rec.get("category_index") or 0),
+                    "target": str(rec.get("target") or ""),
+                    "description": str(rec.get("description") or ""),
+                    "status": str(rec.get("status") or "PLANNED"),
+                    "tool": rec.get("tool"),
+                    "requires": str(rec.get("requires") or ""),
+                    "enabled": _feat_is_enabled(n),
+                }
+            except Exception:
+                return {"number": 0, "name": "?", "category": "",
+                        "category_index": 0, "target": "", "description": "",
+                        "status": "PLANNED", "tool": None, "requires": "",
+                        "enabled": True}
+
+        def _feat_resolve(number):
+            try:
+                n = int(number)
+            except (TypeError, ValueError):
+                return None
+            if n < 1 or n > 13_700_000:
+                return None
+            fr = _feat_registry()
+            if fr is not None and hasattr(fr, "resolve"):
+                try:
+                    rec = fr.resolve(n)
+                    # The resolver returns {"error": ...} (not None) on bad
+                    # input or a missing structure file — treat as not found.
+                    if isinstance(rec, dict) and rec.get("error"):
+                        return None
+                    return _feat_pub(rec) if rec else None
+                except Exception:
+                    pass
+            _records, by_number = _feat_records()
+            rec = by_number.get(n)
+            return _feat_pub(rec) if rec else None
+
+        def _feat_search(query, limit=20):
+            try:
+                limit = max(1, min(100, int(limit or 20)))
+            except Exception:
+                limit = 20
+            q = str(query or "").strip().lower()
+            if not q:
+                # Empty query = browse from the top (the resolver's search
+                # returns [] on an empty query by design).
+                return _feat_first(limit)
+            fr = _feat_registry()
+            if fr is not None and hasattr(fr, "search"):
+                try:
+                    return [_feat_pub(r) for r in (fr.search(q, limit) or [])]
+                except Exception:
+                    pass
+            records, _by = _feat_records()
+            import re as _re
+            tokens = [t for t in _re.split(r"\s+", q) if t]
+            scored = []
+            for rec in records:
+                text = " ".join([str(rec.get("name") or ""),
+                                 str(rec.get("description") or ""),
+                                 str(rec.get("category") or ""),
+                                 str(rec.get("target") or ""),
+                                 str(rec.get("status") or "")]).lower()
+                hits = sum(1 for t in tokens if t in text)
+                if not hits:
+                    continue
+                scored.append((hits + (2 if q in text else 0),
+                               rec.get("number") or 0, rec))
+            scored.sort(key=lambda s: (-s[0], s[1]))
+            return [_feat_pub(r) for _s, _n, r in scored[:limit]]
+
+        def _feat_list_category(cidx, offset=0, limit=20):
+            try:
+                cidx = int(cidx)
+                offset = max(0, int(offset or 0))
+                limit = max(1, min(100, int(limit or 20)))
+            except Exception:
+                return []
+            fr = _feat_registry()
+            if fr is not None and hasattr(fr, "list_category"):
+                try:
+                    return [_feat_pub(r) for r in
+                            (fr.list_category(cidx, offset, limit) or [])]
+                except Exception:
+                    pass
+            records, _by = _feat_records()
+            items = [r for r in records if r.get("category_index") == cidx]
+            return [_feat_pub(r) for r in items[offset:offset + limit]]
+
+        def _feat_first(limit=20):
+            try:
+                limit = max(1, min(100, int(limit or 20)))
+            except Exception:
+                limit = 20
+            out = []
+            for n in range(1, limit + 1):
+                rec = _feat_resolve(n)
+                if rec:
+                    out.append(rec)
+            return out
+
+        def _feat_categories():
+            fr = _feat_registry()
+            if fr is not None and hasattr(fr, "list_categories"):
+                try:
+                    cats = [{"index": int(c["index"]), "name": str(c["name"])}
+                            for c in (fr.list_categories() or [])]
+                    if cats:
+                        return cats
+                except Exception:
+                    pass
+            if fr is not None and hasattr(fr, "list_category"):
+                out = []
+                for i in range(1, 101):
+                    try:
+                        rows = fr.list_category(i, 0, 1) or []
+                    except Exception:
+                        rows = []
+                    if rows:
+                        out.append({"index": i, "name": str(
+                            rows[0].get("category") or f"Category {i}")})
+                if out:
+                    return out
+            records, _by = _feat_records()
+            cats = {}
+            for rec in records:
+                try:
+                    cats[int(rec.get("category_index") or 0)] = str(
+                        rec.get("category") or "")
+                except Exception:
+                    pass
+            return [{"index": i, "name": cats[i]} for i in sorted(cats) if i]
+
+        def _feat_counts():
+            fr = _feat_registry()
+            if fr is not None and hasattr(fr, "counts"):
+                try:
+                    c = dict(fr.counts() or {})
+                    return {"total": int(c.get("total") or 0),
+                            "WORKING": int(c.get("WORKING") or 0),
+                            "NEEDS-KEY": int(c.get("NEEDS-KEY") or 0),
+                            "NEEDS-DEVICE": int(c.get("NEEDS-DEVICE") or 0),
+                            "PLANNED": int(c.get("PLANNED") or 0)}
+                except Exception:
+                    pass
+            records, _by = _feat_records()
+            out = {"total": len(records), "WORKING": 0, "NEEDS-KEY": 0,
+                   "NEEDS-DEVICE": 0, "PLANNED": 0}
+            for rec in records:
+                st = str(rec.get("status") or "")
+                if st in out:
+                    out[st] += 1
+            return out
+
+        @app.get("/api/features")
+        async def features_api(req: Request):
+            """🔍 Features — search / list / get / stats over the registry.
+
+            Query: action=search|list|get|stats, q, category (index or
+            name), status, number, offset, limit. Bearer auth like
+            /api/agents, 401 without it. Never raises.
+            """
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                qp = req.query_params
+                action = str(qp.get("action") or "search").strip().lower()
+                counts = _feat_counts()
+                cats = _feat_categories()
+                if action == "stats":
+                    return JSONResponse({"ok": True, "action": "stats",
+                                         "counts": counts, "categories": cats,
+                                         "total": counts.get("total", 0)})
+                if action == "get":
+                    rec = _feat_resolve(qp.get("number"))
+                    if rec is None:
+                        return JSONResponse({"ok": False,
+                                             "error": "Feature not in registry."},
+                                            status_code=404)
+                    return JSONResponse({"ok": True, "action": "get",
+                                         "feature": rec, "counts": counts})
+                limit = qp.get("limit") or "20"
+                try:
+                    limit = max(1, min(100, int(limit)))
+                except Exception:
+                    limit = 20
+                if action == "list":
+                    cat_raw = str(qp.get("category") or "").strip()
+                    cidx = None
+                    try:
+                        cidx = int(cat_raw)
+                    except (TypeError, ValueError):
+                        low = cat_raw.lower()
+                        for c in cats:
+                            if low and low in str(c.get("name") or "").lower():
+                                cidx = int(c["index"])
+                                break
+                    if cidx is None:
+                        return JSONResponse({"ok": False,
+                                             "error": "Category not found."},
+                                            status_code=404)
+                    try:
+                        offset = max(0, int(qp.get("offset") or 0))
+                    except Exception:
+                        offset = 0
+                    items = _feat_list_category(cidx, offset, limit)
+                    st = str(qp.get("status") or "").strip()
+                    if st:
+                        items = [r for r in items if r.get("status") == st]
+                    return JSONResponse({"ok": True, "action": "list",
+                                         "features": items, "total": len(items),
+                                         "counts": counts, "categories": cats})
+                # default: search (empty q = first features by number)
+                q = str(qp.get("q") or "").strip()
+                cat_raw = str(qp.get("category") or "").strip()
+                cidx = 0
+                try:
+                    cidx = int(cat_raw) if cat_raw else 0
+                except (TypeError, ValueError):
+                    low = cat_raw.lower()
+                    for c in cats:
+                        if low and low in str(c.get("name") or "").lower():
+                            cidx = int(c["index"])
+                            break
+                if q:
+                    items = _feat_search(q, 100)
+                elif cidx:
+                    items = _feat_list_category(cidx, 0, 100)
+                else:
+                    items = _feat_first(100)
+                if cidx:
+                    items = [r for r in items if r.get("category_index") == cidx]
+                st = str(qp.get("status") or "").strip()
+                if st:
+                    items = [r for r in items if r.get("status") == st]
+                total = len(items)
+                return JSONResponse({"ok": True, "action": "search",
+                                     "features": items[:limit], "total": total,
+                                     "counts": counts, "categories": cats})
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)[:120]},
+                                    status_code=500)
+
+        @app.post("/api/features")
+        async def features_action(req: Request):
+            """🔍 Features — run / enable / disable one feature by number.
+
+            JSON {action: run|enable|disable, number}. run enqueues the
+            feature run (tool "features", action "run") via
+            core/action_queue.py and returns accepted — Mark runs it from
+            the queue, the dashboard never calls a tool directly. Bearer
+            auth like /api/agents. Never raises.
+            """
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                body = {}
+            try:
+                action = str((body or {}).get("action") or "").strip().lower()
+                rec = _feat_resolve((body or {}).get("number"))
+                if rec is None:
+                    return JSONResponse({"ok": False,
+                                         "error": "Feature not in registry."},
+                                        status_code=404)
+                n = int(rec["number"])
+                if action == "run":
+                    try:
+                        from core.action_queue import enqueue
+                        qid = enqueue("features", {"action": "run",
+                                                   "number": str(n)})
+                    except Exception:
+                        qid = ""
+                    if not qid:
+                        return JSONResponse({"ok": False,
+                                             "error": "Queue full — try again."},
+                                            status_code=503)
+                    return JSONResponse({"ok": True, "accepted": True,
+                                         "id": qid, "number": n,
+                                         "name": rec.get("name") or "",
+                                         "status": rec.get("status") or "",
+                                         "message": "queued — Mark will run it"})
+                if action in ("enable", "disable"):
+                    on = action == "enable"
+                    if not _feat_set_enabled(n, on):
+                        return JSONResponse({"ok": False,
+                                             "error": "Toggle failed."},
+                                            status_code=500)
+                    return JSONResponse({"ok": True, "number": n,
+                                         "enabled": on})
+                return JSONResponse({"ok": False,
+                                     "error": "action must be run|enable|disable"},
+                                    status_code=400)
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)[:120]},
+                                    status_code=500)
+
+        @app.get("/features", response_class=HTMLResponse)
+        async def features_page(req: Request, token: str = ""):
+            """🔍 Features — registry browser page.
+
+            Same pattern as /agents: auth via ?token= query param, then the
+            page re-polls /api/features with the Bearer token every 2 s.
+            Search + category + status filters, run-by-number, toggles,
+            coverage counter.
+            """
+            if not _valid(token.strip()):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            tok = token.strip().replace('"', "")
+            html = """<!DOCTYPE html>
+<html lang="bn"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🔍 Features — Mark-LVII</title>
+<style>
+body{background:#0b0f16;color:#e6f1ff;font-family:monospace;margin:0;padding:16px}
+h1{color:#22d3ee;font-size:20px;text-align:center}
+p.sub{color:#8fa3bf;font-size:13px;text-align:center}
+#cov{color:#4ade80;text-align:center;font-size:14px;font-weight:bold}
+#st{color:#4ade80;text-align:center;font-size:13px}
+.bar{max-width:900px;margin:12px auto;display:flex;gap:8px;flex-wrap:wrap}
+.bar input,.bar select{flex:1;min-width:140px;background:#131a26;color:#e6f1ff;border:1px solid #1f2c40;border-radius:8px;padding:10px;font-family:monospace}
+.bar button{background:#22d3ee;color:#04222b;border:0;border-radius:8px;padding:10px 18px;font-family:monospace;font-weight:bold;cursor:pointer}
+.list{max-width:900px;margin:0 auto}
+.row{background:#131a26;border:1px solid #1f2c40;border-radius:12px;padding:10px 12px;margin:8px 0;display:flex;gap:10px;align-items:center}
+.row .nm{flex:1;font-size:13px;word-break:break-word}
+.row .bd{font-size:11px;font-weight:bold;padding:2px 8px;border-radius:999px}
+.bd.WORKING{background:#22c55e;color:#052e16}
+.bd.NEEDS-KEY{background:#f59e0b;color:#451a03}
+.bd.NEEDS-DEVICE{background:#f97316;color:#431407}
+.bd.PLANNED{background:#334155;color:#e2e8f0}
+.row button{background:#0b0f16;color:#22d3ee;border:1px solid #22d3ee;border-radius:8px;padding:6px 10px;font-family:monospace;font-weight:bold;cursor:pointer}
+.row button.off{color:#8fa3bf;border-color:#1f2c40}
+.dim{color:#8fa3bf;font-size:12px;text-align:center}
+</style></head><body>
+<h1>🔍 Features — registry browser</h1>
+<p class="sub">Search koro, category dekho, number diye chalao — Mark queue theke chalabe.</p>
+<p id="cov">Loading…</p>
+<div class="bar">
+<input id="q" placeholder="Search features…  jemon 'YouTube upload'" oninput="load()">
+<select id="cat" onchange="load()"><option value="0">All categories</option></select>
+<select id="stf" onchange="load()">
+<option value="">All statuses</option><option>WORKING</option>
+<option>NEEDS-KEY</option><option>NEEDS-DEVICE</option><option>PLANNED</option>
+</select>
+</div>
+<div class="bar">
+<input id="num" placeholder="Run by number — 1 – 13700000" inputmode="numeric">
+<button onclick="runNum()">▶ RUN</button>
+</div>
+<p id="st">Loading…</p>
+<div class="list" id="list"></div>
+<script>
+const TOK = "__TOK__";
+let catsLoaded = false;
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function hdr(){ return {'Authorization':'Bearer '+TOK}; }
+async function load(){
+  try {
+    const q = document.getElementById('q').value;
+    const cat = document.getElementById('cat').value;
+    const stf = document.getElementById('stf').value;
+    const u = '/api/features?action=search&limit=30&q='+encodeURIComponent(q)
+      +'&category='+encodeURIComponent(cat)+'&status='+encodeURIComponent(stf);
+    const r = await fetch(u, {headers: hdr()});
+    if(!r.ok){ document.getElementById('st').textContent = '⛔ Unauthorized — notun QR/token diye abar kholo.'; return; }
+    const d = await r.json();
+    const c = d.counts || {};
+    document.getElementById('cov').textContent =
+      (Number(c.WORKING)||0).toLocaleString()+' / '+(Number(c.total)||0).toLocaleString()+' working'
+      +'   •   NEEDS-KEY '+(Number(c['NEEDS-KEY'])||0).toLocaleString()
+      +'   •   NEEDS-DEVICE '+(Number(c['NEEDS-DEVICE'])||0).toLocaleString()
+      +'   •   PLANNED '+(Number(c.PLANNED)||0).toLocaleString();
+    if(!catsLoaded && d.categories){
+      catsLoaded = true;
+      const sel = document.getElementById('cat');
+      d.categories.forEach(function(ct){
+        const o = document.createElement('option');
+        o.value = ct.index; o.textContent = ct.index+'. '+ct.name;
+        sel.appendChild(o);
+      });
+    }
+    const list = d.features || [];
+    document.getElementById('st').textContent =
+      '✅ '+new Date().toLocaleTimeString()+' — '+list.length+' shown, '+d.total+' match';
+    document.getElementById('list').innerHTML = list.map(function(f){
+      return '<div class="row"><span class="nm">#'+f.number+'  '+esc(f.name)+'</span>'
+        + '<span class="bd '+esc(f.status)+'">'+esc(f.status)+'</span>'
+        + '<button class="'+(f.enabled?'':'off')+'" onclick="toggleF('+f.number+','+(f.enabled?'false':'true')+')">'
+        + (f.enabled?'ON':'OFF')+'</button>'
+        + '<button onclick="runF('+f.number+')">▶ RUN</button></div>';
+    }).join('') || '<p class="dim">Kono feature milche na — search ba filter bodle dekho.</p>';
+  } catch(e){
+    document.getElementById('st').textContent = '⏳ Server-e pouchate parlam na — ektu wait koro.';
+  }
+}
+async function postF(body){
+  const r = await fetch('/api/features', {method:'POST', headers:Object.assign(hdr(),{'Content-Type':'application/json'}), body: JSON.stringify(body)});
+  return r.json();
+}
+async function toggleF(n, on){
+  const d = await postF({action: on?'enable':'disable', number: n});
+  document.getElementById('st').textContent = d.ok ? ('✅ #'+n+(on?' ON korlam.':' OFF korlam.')) : ('⚠️ '+(d.error||'toggle holo na.'));
+  load();
+}
+async function runF(n){
+  const d = await postF({action:'run', number: n});
+  document.getElementById('st').textContent = d.ok ? ('✅ #'+n+' '+esc(d.name||'')+': queued — Mark will run it (#'+d.id+').') : ('⚠️ '+(d.error||'queue-te dite parlam na.'));
+}
+async function runNum(){
+  const v = document.getElementById('num').value.trim();
+  const n = parseInt(v, 10);
+  if(!n || n < 1 || n > 13700000){ document.getElementById('st').textContent = '⚠️ Number dao — 1 theke 13700000-er modhye.'; return; }
+  runF(n);
+}
+load(); setInterval(load, 2000);
+</script></body></html>""".replace("__TOK__", tok)
+            return HTMLResponse(html)
+
+        # ── 💬 MUSE BRIDGE (dashboard) ─────────────────────────────────────
+        # Tasks Mark can't do locally get queued to Muse via the Render
+        # dashboard. core/muse_bridge.py landed 2026-11-17 (verified live:
+        # create -> list -> seen -> done); every handler still imports it
+        # lazily and answers honestly when it is missing instead of
+        # raising. Contract: create_task(instruction, tried="", context="")
+        # -> id, list_tasks(status=None), get_task(id), set_status(id,
+        # status, result="") with status queued/seen/done.
+
+        def _muse_bridge():
+            try:
+                from core import muse_bridge as _mb
+                return _mb
+            except Exception:
+                return None
+
+        @app.get("/api/muse-tasks")
+        async def muse_tasks_list(req: Request):
+            """💬 Muse Bridge — list queued tasks, optional ?status= filter.
+            Bearer auth like /api/agents. Never raises."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                mb = _muse_bridge()
+                if mb is None:
+                    return JSONResponse({"tasks": [],
+                                         "error": "Muse Bridge not built yet — core/muse_bridge.py missing."})
+                status = str(req.query_params.get("status") or "").strip() or None
+                if status and status not in ("queued", "seen", "done"):
+                    return JSONResponse({"ok": False,
+                                         "error": "status must be queued|seen|done"},
+                                        status_code=400)
+                tasks = mb.list_tasks(status) if status else mb.list_tasks()
+                return JSONResponse({"ok": True, "tasks": list(tasks or [])})
+            except Exception as e:
+                return JSONResponse({"tasks": [], "error": str(e)[:120]})
+
+        @app.post("/api/muse-tasks")
+        async def muse_tasks_create(req: Request):
+            """💬 Muse Bridge — queue a task for Muse.
+            JSON {instruction, tried, context} -> {ok, id}. Bearer auth.
+            Never raises."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                body = {}
+            try:
+                mb = _muse_bridge()
+                if mb is None:
+                    return JSONResponse({"ok": False,
+                                         "error": "Muse Bridge not built yet — core/muse_bridge.py missing."},
+                                        status_code=503)
+                instruction = str((body or {}).get("instruction") or "").strip()
+                if not instruction:
+                    return JSONResponse({"ok": False,
+                                         "error": "instruction required"},
+                                        status_code=400)
+                tid = mb.create_task(
+                    instruction,
+                    tried=str((body or {}).get("tried") or ""),
+                    context=str((body or {}).get("context") or ""))
+                if not tid:
+                    return JSONResponse({"ok": False,
+                                         "error": "Bridge returned no id."},
+                                        status_code=500)
+                return JSONResponse({"ok": True, "id": str(tid)})
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)[:120]},
+                                    status_code=500)
+
+        @app.get("/api/muse-tasks/{task_id}")
+        async def muse_task_get(req: Request, task_id: str):
+            """💬 Muse Bridge — one task by id. Bearer auth. Never raises."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                mb = _muse_bridge()
+                if mb is None:
+                    return JSONResponse({"ok": False,
+                                         "error": "Muse Bridge not built yet — core/muse_bridge.py missing."},
+                                        status_code=503)
+                task = mb.get_task(task_id)
+                if task is None:
+                    return JSONResponse({"ok": False,
+                                         "error": "Task not found."},
+                                        status_code=404)
+                return JSONResponse({"ok": True, "task": task})
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)[:120]},
+                                    status_code=500)
+
+        @app.post("/api/muse-tasks/{task_id}")
+        async def muse_task_update(req: Request, task_id: str):
+            """💬 Muse Bridge — mark progress: {status: seen|done, result}.
+            This is how Muse marks a task seen / done with its result.
+            Bearer auth. Never raises."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                body = {}
+            try:
+                mb = _muse_bridge()
+                if mb is None:
+                    return JSONResponse({"ok": False,
+                                         "error": "Muse Bridge not built yet — core/muse_bridge.py missing."},
+                                        status_code=503)
+                status = str((body or {}).get("status") or "").strip()
+                if status not in ("seen", "done"):
+                    return JSONResponse({"ok": False,
+                                         "error": "status must be seen|done"},
+                                        status_code=400)
+                ok = mb.set_status(task_id, status,
+                                   result=str((body or {}).get("result") or ""))
+                if not ok:
+                    return JSONResponse({"ok": False,
+                                         "error": "Task not found."},
+                                        status_code=404)
+                try:
+                    task = mb.get_task(task_id)
+                except Exception:
+                    task = None
+                return JSONResponse({"ok": True, "task": task})
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)[:120]},
+                                    status_code=500)
+
+        @app.get("/muse-tasks", response_class=HTMLResponse)
+        async def muse_tasks_page(req: Request, token: str = ""):
+            """💬 Muse Bridge — the task queue for Muse.
+
+            Same pattern as /agents: auth via ?token= query param, then the
+            page re-polls /api/muse-tasks with the Bearer token every 2 s.
+            Shows the queue with status + result; a form queues a new task,
+            and Seen / Done buttons mark progress.
+            """
+            if not _valid(token.strip()):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            tok = token.strip().replace('"', "")
+            html = """<!DOCTYPE html>
+<html lang="bn"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>💬 Muse Tasks — Mark-LVII</title>
+<style>
+body{background:#0b0f16;color:#e6f1ff;font-family:monospace;margin:0;padding:16px}
+h1{color:#22d3ee;font-size:20px;text-align:center}
+p.sub{color:#8fa3bf;font-size:13px;text-align:center}
+#st{color:#4ade80;text-align:center;font-size:13px}
+.box{max-width:900px;margin:12px auto}
+.box textarea,.box input{width:100%;box-sizing:border-box;background:#131a26;color:#e6f1ff;border:1px solid #1f2c40;border-radius:8px;padding:10px;font-family:monospace;margin:4px 0}
+.box button{background:#22d3ee;color:#04222b;border:0;border-radius:8px;padding:10px 18px;font-family:monospace;font-weight:bold;cursor:pointer}
+.bar{max-width:900px;margin:12px auto;display:flex;gap:8px}
+.bar select{background:#131a26;color:#e6f1ff;border:1px solid #1f2c40;border-radius:8px;padding:8px;font-family:monospace}
+.card{background:#131a26;border:1px solid #1f2c40;border-radius:12px;padding:12px;margin:8px auto;max-width:900px}
+.card h2{font-size:14px;margin:0 0 4px;word-break:break-word}
+.card .meta{color:#8fa3bf;font-size:12px}
+.card .res{font-size:13px;color:#e6f1ff;word-break:break-word;white-space:pre-wrap}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:bold}
+.badge.queued{background:#f59e0b;color:#451a03}
+.badge.seen{background:#0ea5e9;color:#04222b}
+.badge.done{background:#22c55e;color:#052e16}
+.card button{background:#0b0f16;color:#22d3ee;border:1px solid #22d3ee;border-radius:8px;padding:6px 10px;font-family:monospace;font-weight:bold;cursor:pointer;margin:4px 4px 0 0}
+.dim{color:#8fa3bf;font-size:12px;text-align:center}
+</style></head><body>
+<h1>💬 Muse Tasks — Mark-er Muse Bridge queue</h1>
+<p class="sub">Mark ja nije pare na, Muse-ke pathay — ekhane queue, status ar result dekho. Prottek 2 sec-e update hoy.</p>
+<div class="box">
+<textarea id="ins" rows="3" placeholder="Instruction — Muse-ke ki korte hobe?"></textarea>
+<input id="tried" placeholder="Tried (optional) — Mark ki ki try koreche">
+<input id="ctx" placeholder="Context (optional)">
+<button onclick="createTask()">➕ Queue task for Muse</button>
+</div>
+<div class="bar"><select id="flt" onchange="load()">
+<option value="">All statuses</option><option value="queued">queued</option>
+<option value="seen">seen</option><option value="done">done</option>
+</select></div>
+<p id="st">Loading…</p>
+<div id="list"></div>
+<script>
+const TOK = "__TOK__";
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function hdr(){ return {'Authorization':'Bearer '+TOK}; }
+async function load(){
+  try {
+    const f = document.getElementById('flt').value;
+    const u = '/api/muse-tasks' + (f ? ('?status='+encodeURIComponent(f)) : '');
+    const r = await fetch(u, {headers: hdr()});
+    if(!r.ok){ document.getElementById('st').textContent = '⛔ Unauthorized — notun QR/token diye abar kholo.'; return; }
+    const d = await r.json();
+    const list = d.tasks || [];
+    document.getElementById('st').textContent =
+      '✅ '+new Date().toLocaleTimeString()+' — '+list.length+' task'
+      + (d.error ? (' — ⚠️ '+esc(d.error)) : '');
+    document.getElementById('list').innerHTML = list.map(function(t){
+      const st = esc(t.status || 'queued');
+      return '<div class="card"><h2>'+esc(t.instruction || t.id || '?')+'</h2>'
+        + '<p class="meta">id: '+esc(t.id || '')+' &middot; '+esc(t.created_at || t.at || '')+'</p>'
+        + '<span class="badge '+st+'">'+st+'</span>'
+        + (t.tried ? '<p class="meta">Tried: '+esc(t.tried)+'</p>' : '')
+        + (t.context ? '<p class="meta">Context: '+esc(t.context)+'</p>' : '')
+        + (t.result ? '<p class="res">Result: '+esc(t.result)+'</p>' : '')
+        + '<div><button onclick="markTask(\''+esc(t.id||'')+'\',\'seen\')">👀 Seen</button>'
+        + '<button onclick="markDone(\''+esc(t.id||'')+'\')">✅ Done</button></div>'
+        + '</div>';
+    }).join('') || '<p class="dim">Queue khali — opore form diye Muse-ke task dao.</p>';
+  } catch(e){
+    document.getElementById('st').textContent = '⏳ Server-e pouchate parlam na — ektu wait koro.';
+  }
+}
+async function createTask(){
+  const ins = document.getElementById('ins').value.trim();
+  if(!ins){ document.getElementById('st').textContent = '⚠️ Instruction dao — Muse-ke ki korte hobe?'; return; }
+  const r = await fetch('/api/muse-tasks', {method:'POST', headers:Object.assign(hdr(),{'Content-Type':'application/json'}), body: JSON.stringify({instruction: ins, tried: document.getElementById('tried').value, context: document.getElementById('ctx').value})});
+  const d = await r.json();
+  document.getElementById('st').textContent = d.ok ? ('✅ Task queue holo (id '+d.id+').') : ('⚠️ '+(d.error||'queue holo na.'));
+  if(d.ok){ document.getElementById('ins').value=''; document.getElementById('tried').value=''; document.getElementById('ctx').value=''; }
+  load();
+}
+async function markTask(id, status, result){
+  const r = await fetch('/api/muse-tasks/'+encodeURIComponent(id), {method:'POST', headers:Object.assign(hdr(),{'Content-Type':'application/json'}), body: JSON.stringify({status: status, result: result || ''})});
+  const d = await r.json();
+  document.getElementById('st').textContent = d.ok ? ('✅ '+id+' → '+status) : ('⚠️ '+(d.error||'update holo na.'));
+  load();
+}
+function markDone(id){
+  const res = prompt('Result (optional) — Muse ki korlo / ki pelo?') || '';
+  markTask(id, 'done', res);
+}
+load(); setInterval(load, 2000);
+</script></body></html>""".replace("__TOK__", tok)
+            return HTMLResponse(html)
+
+        @app.get("/api/automation")
+        async def automation_api(req: Request):
+            """⚡ Automation — tasks + history + template names.
+
+            Same auth as /api/agents: Bearer token, 401 without it.
+            Never raises — an engine failure returns empty lists + error.
+            """
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core.automation import ENGINE, TEMPLATES
+                tasks = ENGINE.list_tasks()
+                last_by_task = {}
+                for h in ENGINE.history():
+                    last_by_task[h.get("task_id")] = h
+                for t in tasks:
+                    t["last_run_result"] = last_by_task.get(t.get("id"))
+                return JSONResponse({
+                    "tasks": tasks,
+                    "history": ENGINE.history()[-20:],
+                    "templates": sorted(TEMPLATES.keys()),
+                })
+            except Exception as e:
+                return JSONResponse({"tasks": [], "history": [],
+                                     "templates": [],
+                                     "error": str(e)[:120]})
+
+        @app.post("/api/automation")
+        async def automation_action(req: Request):
+            """⚡ Automation — create / update / delete / enable / disable /
+            run a task. JSON {action, task_id, task/patch, ...}.
+
+            Auth: Bearer token. Never raises. "run" starts the task on a
+            background thread and returns at once (a run can take minutes).
+            """
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                body = {}
+            if not isinstance(body, dict):
+                body = {}
+            try:
+                from core.automation import ENGINE
+                action = str(body.get("action") or "").strip().lower()
+                task_id = str(body.get("task_id") or "").strip()
+                if action == "create":
+                    task = body.get("task") or {}
+                    if not isinstance(task, dict):
+                        task = {k: body.get(k) for k in
+                                ("name", "trigger", "steps", "condition")
+                                if body.get(k) is not None}
+                    tid = ENGINE.create_task(task)
+                    if not tid:
+                        return JSONResponse(
+                            {"error": "Task banate parlam na — naam, trigger ar steps thik ache kina dekho."},
+                            status_code=400)
+                    return JSONResponse({"ok": True, "task_id": tid})
+                if action == "update":
+                    patch = body.get("patch") or body.get("task") or {}
+                    if not isinstance(patch, dict):
+                        patch = {}
+                    if not task_id or not ENGINE.update_task(task_id, patch):
+                        return JSONResponse(
+                            {"error": "Task update korte parlam na — id / patch dekho."},
+                            status_code=400)
+                    return JSONResponse({"ok": True, "task_id": task_id})
+                if action == "delete":
+                    if not task_id or not ENGINE.delete_task(task_id):
+                        return JSONResponse({"error": "Task pelam na."},
+                                            status_code=404)
+                    return JSONResponse({"ok": True})
+                if action in ("enable", "disable"):
+                    if not task_id or not ENGINE.set_enabled(
+                            task_id, action == "enable"):
+                        return JSONResponse({"error": "Task pelam na."},
+                                            status_code=404)
+                    return JSONResponse({"ok": True,
+                                         "enabled": action == "enable"})
+                if action == "template":
+                    name = str(body.get("template") or body.get("name") or "").strip()
+                    tid = ENGINE.create_from_template(name)
+                    if not tid:
+                        return JSONResponse(
+                            {"error": f"Template '{name}' chinlam na."},
+                            status_code=400)
+                    return JSONResponse({"ok": True, "task_id": tid})
+                if action == "run":
+                    if not task_id or ENGINE.get_task(task_id) is None:
+                        return JSONResponse({"error": "Task pelam na."},
+                                            status_code=404)
+                    threading.Thread(
+                        target=lambda: ENGINE.run_task_now(task_id),
+                        daemon=True, name=f"automation-api-run-{task_id}").start()
+                    return JSONResponse({"ok": True,
+                                         "message": "Task cholche — history-te asbe."})
+                return JSONResponse(
+                    {"error": "Action bujhlam na: create | update | delete | enable | disable | run | template."},
+                    status_code=400)
+            except Exception as e:
+                return JSONResponse({"error": str(e)[:120]}, status_code=500)
+
+        @app.post("/api/automation/trigger/{task_id}")
+        async def automation_webhook(req: Request, task_id: str):
+            """⚡ Automation webhook trigger — fire one task from outside
+            (e.g. an external service calling this URL).
+
+            Auth: Bearer token. Runs the task on a background thread and
+            returns "accepted" at once. Never raises.
+            """
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core.automation import ENGINE
+                tid = str(task_id or "").strip()
+                if ENGINE.get_task(tid) is None:
+                    return JSONResponse({"error": "Task pelam na."},
+                                        status_code=404)
+                threading.Thread(
+                    target=lambda: ENGINE.run_task_now(tid),
+                    daemon=True, name=f"automation-webhook-{tid}").start()
+                return JSONResponse({"ok": True, "accepted": True,
+                                     "task_id": tid,
+                                     "message": "Task trigger holo — background-e cholche."})
+            except Exception as e:
+                return JSONResponse({"error": str(e)[:120]}, status_code=500)
+
+        @app.get("/automation", response_class=HTMLResponse)
+        async def automation_page(req: Request, token: str = ""):
+            """⚡ Automation — task cards + templates + history + create/edit
+            form. Same pattern as /agents: auth via ?token=, re-polls
+            /api/automation every 2 s. Edit happens here, not on the HUD."""
+            if not _valid(token.strip()):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            tok = token.strip().replace('"', "")
+            html = """<!DOCTYPE html>
+<html lang="bn"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>⚡ Automation — Mark-LVII</title>
+<style>
+body{background:#0b0f16;color:#e6f1ff;font-family:monospace;margin:0;padding:16px}
+h1{color:#22d3ee;font-size:20px;text-align:center}
+p.sub{color:#8fa3bf;font-size:13px;text-align:center}
+#st{color:#4ade80;text-align:center;font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;max-width:1000px;margin:16px auto}
+.card{background:#131a26;border:1px solid #1f2c40;border-radius:12px;padding:12px}
+.card.off{opacity:.55}
+.card h2{font-size:15px;margin:0 0 4px}
+.flow{color:#8fa3bf;font-size:12px;word-break:break-word}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:bold}
+.badge.on{background:#22c55e;color:#052e16}
+.badge.off{background:#334155;color:#e2e8f0}
+.meta{font-size:12px;color:#8fa3bf}
+button{background:#22d3ee;color:#04222b;border:0;border-radius:8px;padding:7px 12px;
+font-family:monospace;font-weight:bold;cursor:pointer;margin:4px 4px 0 0}
+button.dim{background:#1f2c40;color:#e6f1ff}
+button.danger{background:#ef4444;color:#fff}
+input,textarea,select{width:100%;background:#0b0f16;color:#e6f1ff;border:1px solid #1f2c40;
+border-radius:8px;padding:8px;font-family:monospace;margin:4px 0;box-sizing:border-box}
+form{max-width:1000px;margin:16px auto;background:#131a26;border:1px solid #1f2c40;border-radius:12px;padding:14px}
+h2.sec{color:#22d3ee;font-size:16px;max-width:1000px;margin:24px auto 0}
+ul.hist{max-width:1000px;margin:8px auto;color:#8fa3bf;font-size:13px}
+</style></head><body>
+<h1>⚡ Automation — scheduled tasks</h1>
+<p class="sub">Trigger ➜ steps ➜ condition. Prottek 2 sec-e update hoy. Edit ekhanei hoy — HUD-e sudhu on/off, run, delete.</p>
+<p id="st">Loading…</p>
+<div class="grid" id="grid"></div>
+<h2 class="sec">🍳 Recipe templates — ek click-e task banao</h2>
+<div class="grid" id="tpl" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))"></div>
+<h2 class="sec">📜 History — sesh 20 run</h2>
+<ul class="hist" id="hist"></ul>
+<h2 class="sec">✏️ Create / Edit task</h2>
+<form id="f">
+<input type="hidden" id="tid">
+<label>Task name</label><input id="fname" placeholder="Morning briefing">
+<label>Trigger (JSON)</label><textarea id="ftrig" rows="2">{"type": "time", "kind": "daily", "time": "07:50"}</textarea>
+<label>Steps (JSON list — tool + args)</label><textarea id="fsteps" rows="3">[{"tool": "weather_report", "args": {"city": "Kolkata"}}]</textarea>
+<label>Condition (JSON, optional — {"type": "online"} / {"type": "idle", "minutes": 10})</label><textarea id="fcond" rows="1"></textarea>
+<br><button type="submit">💾 Save task</button>
+<button type="button" class="dim" onclick="clearForm()">Clear</button>
+</form>
+<script>
+const TOK = "__TOK__";
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function trigText(t){
+  t = t||{}; const ty = String(t.type||'?').toLowerCase();
+  if(ty==='time') return '🕐 '+(t.kind||'time')+' '+(t.time||'')+((t.kind==='once')?' '+(t.date||t.at||''):(t.kind==='weekly')?' weekday '+t.weekday:'');
+  if(ty==='interval') return '🔁 every '+t.every+' '+(t.unit||'minutes');
+  if(ty==='keyword') return "💬 keyword '"+t.phrase+"'";
+  if(ty==='event') return "⚡ event '"+t.name+"'";
+  if(ty==='webhook') return '🌐 webhook';
+  return ty;
+}
+function cd(nr){
+  if(!nr) return '—';
+  const d = Math.floor((new Date(nr)-Date.now())/1000);
+  if(d<=0) return 'due now';
+  const h=String(Math.floor(d/3600)).padStart(2,'0'), m=String(Math.floor(d%3600/60)).padStart(2,'0'), s=String(d%60).padStart(2,'0');
+  return h+':'+m+':'+s;
+}
+let cache = [];
+async function api(action, body){
+  const r = await fetch('/api/automation', {method:'POST', headers:{'Authorization':'Bearer '+TOK,'Content-Type':'application/json'}, body: JSON.stringify(Object.assign({action}, body||{}))});
+  const d = await r.json().catch(()=>({}));
+  document.getElementById('st').textContent = d.ok ? ('✅ '+(d.message||'done')) : ('⚠️ '+(d.error||'failed'));
+  if(d.ok) load();
+  return d;
+}
+async function load(){
+  try {
+    const r = await fetch('/api/automation', {headers:{'Authorization':'Bearer '+TOK}});
+    if(!r.ok){ document.getElementById('st').textContent = '⛔ Unauthorized — notun QR/token diye abar kholo.'; return; }
+    const d = await r.json();
+    cache = d.tasks || [];
+    document.getElementById('st').textContent = '✅ '+new Date().toLocaleTimeString()+' — '+cache.length+' task';
+    document.getElementById('grid').innerHTML = cache.map(function(t){
+      const steps = (t.steps||[]).map(function(s){ return esc(s.tool); }).join(' ➜ ') || 'no steps';
+      const cond = t.condition ? ' [only if: '+esc(t.condition.type||'?')+']' : '';
+      const last = t.last_run_result;
+      const lastTxt = last ? ('last run: '+(last.status==='ok'?'✅':'❌')+' '+esc(last.status)+' '+esc(last.finished_at||last.started_at||'')) : 'last run: —';
+      return '<div class="card'+(t.enabled?'':' off')+'">'
+        + '<h2>'+(t.enabled?'🟢':'⚪')+' '+esc(t.name)+'</h2>'
+        + '<p class="flow">'+esc(trigText(t.trigger))+' ➜ '+steps+esc(cond)+'</p>'
+        + '<span class="badge '+(t.enabled?'on':'off')+'">'+(t.enabled?'ON':'OFF')+'</span>'
+        + ' <span class="meta">⏭ '+cd(t.next_run)+'</span>'
+        + '<p class="meta">'+esc(lastTxt)+'</p>'
+        + '<button onclick="api(\''+(t.enabled?'disable':'enable')+'\', {task_id: \''+esc(t.id)+'\'})">'+(t.enabled?'⏸ OFF':'▶ ON')+'</button>'
+        + '<button onclick="api(\'run\', {task_id: \''+esc(t.id)+'\'})">▶ RUN NOW</button>'
+        + '<button class="dim" onclick="editTask(\''+esc(t.id)+'\')">✏️ EDIT</button>'
+        + '<button class="danger" onclick="if(confirm(\'Delete '+esc(t.name)+\'?\')) api(\'delete\', {task_id: \''+esc(t.id)+'\'})">🗑 DELETE</button>'
+        + '</div>';
+    }).join('') || '<p class="sub">Kono task nei ekhono — template theke ekta banao.</p>';
+    document.getElementById('tpl').innerHTML = (d.templates||[]).map(function(n){
+      return '<div class="card"><h2>'+esc(n)+'</h2><button onclick="api(\'template\', {template: \''+esc(n)+'\'})">➕ Create</button></div>';
+    }).join('');
+    document.getElementById('hist').innerHTML = (d.history||[]).slice().reverse().map(function(h){
+      return '<li>'+esc(h.started_at||'')+' — '+esc(h.task_name||h.task_id||'')+' — '+(h.status==='ok'?'✅':'❌')+' '+esc(h.status)+' ('+esc(String(h.duration_s==null?'':h.duration_s))+'s)</li>';
+    }).join('') || '<li>History khali.</li>';
+  } catch(e){
+    document.getElementById('st').textContent = '⏳ Server-e pouchate parlam na — ektu wait koro.';
+  }
+}
+function editTask(id){
+  const t = cache.find(function(x){ return x.id===id; });
+  if(!t) return;
+  document.getElementById('tid').value = t.id;
+  document.getElementById('fname').value = t.name||'';
+  document.getElementById('ftrig').value = JSON.stringify(t.trigger||{});
+  document.getElementById('fsteps').value = JSON.stringify(t.steps||[]);
+  document.getElementById('fcond').value = t.condition ? JSON.stringify(t.condition) : '';
+  document.getElementById('fname').scrollIntoView();
+}
+function clearForm(){
+  document.getElementById('tid').value=''; document.getElementById('fname').value='';
+  document.getElementById('ftrig').value='{"type": "time", "kind": "daily", "time": "07:50"}';
+  document.getElementById('fsteps').value='[{"tool": "weather_report", "args": {"city": "Kolkata"}}]';
+  document.getElementById('fcond').value='';
+}
+document.getElementById('f').addEventListener('submit', async function(e){
+  e.preventDefault();
+  let trig, steps, cond = null;
+  try { trig = JSON.parse(document.getElementById('ftrig').value); steps = JSON.parse(document.getElementById('fsteps').value); }
+  catch(err){ document.getElementById('st').textContent = '⚠️ Trigger / Steps JSON thik nei.'; return; }
+  const c = document.getElementById('fcond').value.trim();
+  if(c){ try { cond = JSON.parse(c); } catch(err){ document.getElementById('st').textContent = '⚠️ Condition JSON thik nei.'; return; } }
+  const tid = document.getElementById('tid').value.trim();
+  const task = {name: document.getElementById('fname').value.trim(), trigger: trig, steps: steps};
+  if(cond) task.condition = cond;
+  if(tid) await api('update', {task_id: tid, patch: task});
+  else await api('create', {task});
+  clearForm();
+});
+load(); setInterval(load, 2000);
+</script></body></html>""".replace("__TOK__", tok)
+            return HTMLResponse(html)
+
+        @app.post("/api/action")
+        async def queue_action(req: Request):
+            """⚡ Quick action — ENQUEUE a tool for Mark to run.
+
+            JSON {tool, args}. The HUD and the /main-agent page never call a
+            tool directly: they queue here and show "queued — Mark will run
+            it". main.py drains core/action_queue.py at integration.
+            Auth: Bearer token. Never raises.
+            """
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                body = {}
+            if not isinstance(body, dict):
+                body = {}
+            try:
+                from core.action_queue import enqueue
+                tool = str(body.get("tool") or "").strip()
+                args = body.get("args") or {}
+                if not isinstance(args, dict):
+                    args = {}
+                qid = enqueue(tool, args)
+                if not qid:
+                    return JSONResponse(
+                        {"error": "Queue-te dite parlam na — tool-er naam dekho (ba queue full)."},
+                        status_code=400)
+                return JSONResponse({"ok": True, "queued_id": qid,
+                                     "message": f"✅ {tool} queued — Mark will run it."})
+            except Exception as e:
+                return JSONResponse({"error": str(e)[:120]}, status_code=500)
+
+        @app.get("/api/main-agent")
+        async def main_agent_api(req: Request):
+            """🧠 Main Agent — Mark status, agents summary, automation
+            summary, location, pending actions. Bearer auth. Never raises."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core.mark_status import snapshot as _mark_snapshot
+                mark = _mark_snapshot()
+            except Exception:
+                mark = {"current_task": "Idle — waiting for you.",
+                        "last_response": "", "queue_len": 0, "updated_at": ""}
+            try:
+                from core.agents import REGISTRY
+                agents = REGISTRY.snapshot()
+            except Exception:
+                agents = []
+            try:
+                from core.automation import ENGINE
+                tasks = ENGINE.list_tasks()
+                nxts = [t.get("next_run") for t in tasks
+                        if t.get("enabled") and t.get("next_run")]
+                automation = {
+                    "total": len(tasks),
+                    "enabled": sum(1 for t in tasks if t.get("enabled")),
+                    "next_run": min(nxts) if nxts else None,
+                    "tasks": [{"id": t.get("id"), "name": t.get("name"),
+                               "enabled": t.get("enabled"),
+                               "next_run": t.get("next_run")}
+                              for t in tasks],
+                }
+            except Exception:
+                automation = {"total": 0, "enabled": 0, "next_run": None,
+                              "tasks": []}
+            try:
+                from core.phone_location import last_fix
+                location = last_fix()
+            except Exception:
+                location = None
+            try:
+                from core.action_queue import list_pending
+                pending = list_pending()
+            except Exception:
+                pending = []
+            return JSONResponse({
+                "mark": mark,
+                "agents": agents,
+                "automation": automation,
+                "location": location,
+                "pending_actions": pending,
+            })
+
+        @app.get("/main-agent", response_class=HTMLResponse)
+        async def main_agent_page(req: Request, token: str = ""):
+            """🧠 Main Agent — master screen as a dashboard page: Mark live
+            status, 7 agents + automation summary, phone screen, PC screen,
+            location, quick actions. Same pattern as /agents: auth via
+            ?token=, re-polls /api/main-agent every 2 s, screens every 4 s."""
+            if not _valid(token.strip()):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            tok = token.strip().replace('"', "")
+            html = """<!DOCTYPE html>
+<html lang="bn"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🧠 Main Agent — Mark-LVII</title>
+<style>
+body{background:#0b0f16;color:#e6f1ff;font-family:monospace;margin:0;padding:16px}
+h1{color:#22d3ee;font-size:20px;text-align:center}
+h2{color:#22d3ee;font-size:16px;max-width:900px;margin:20px auto 6px}
+p.sub{color:#8fa3bf;font-size:13px;text-align:center}
+#st{color:#4ade80;text-align:center;font-size:13px}
+.box{max-width:900px;margin:8px auto;background:#131a26;border:1px solid #1f2c40;border-radius:12px;padding:12px}
+.meta{font-size:13px;color:#e6f1ff;word-break:break-word}
+.dim{color:#8fa3bf;font-size:12px}
+img{max-width:100%;border:2px solid #22d3ee;border-radius:12px;background:#000;display:block;margin:0 auto}
+button{background:#22d3ee;color:#04222b;border:0;border-radius:8px;padding:8px 14px;
+font-family:monospace;font-weight:bold;cursor:pointer;margin:4px}
+button.dim{background:#1f2c40;color:#e6f1ff}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+</style></head><body>
+<h1>🧠 Main Agent — Mark-er master screen</h1>
+<p class="sub">Mark + 7 agent + automation + phone/PC screen + location — sob ek jaigai.</p>
+<p id="st">Loading…</p>
+<h2>🧠 Mark — live status</h2>
+<div class="box"><p class="meta" id="mark">—</p></div>
+<h2>🤖 7 worker agent + ⚡ automation</h2>
+<div class="box"><p class="meta" id="agents">—</p><p class="dim" id="auto">—</p></div>
+<h2>📱 Phone screen (still image)</h2>
+<div class="box" style="text-align:center">
+<img id="phone" alt="Phone screen ekhono ashe ni — Refresh chapo.">
+<br><button onclick="refreshPhone()">🔄 Refresh phone screen</button></div>
+<h2>🖥️ PC screen</h2>
+<div class="box" style="text-align:center">
+<img id="pc" alt="PC screenshot ekhono neoa hoy ni — Refresh chapo.">
+<br><button onclick="loadPc()">🔄 Refresh PC screen</button></div>
+<h2>📍 Location — phone kothay</h2>
+<div class="box"><p class="meta" id="loc">—</p>
+<button onclick="findPhone()">📍 Find phone</button></div>
+<h2>⚡ Quick actions — queue-te jabe, Mark chalabe</h2>
+<div class="box"><div class="grid" id="qa"></div><p class="dim" id="pend">—</p></div>
+<script>
+const TOK = "__TOK__";
+const QA = [
+  ['📱 Open app', 'open_app', {app: 'Calculator'}],
+  ['🎬 Upload video', 'youtube_upload', {file_path: '', title: "Today's video"}],
+  ['💬 Send WhatsApp', 'whatsapp_send', {to: '', message: ''}],
+  ['💾 Backup', 'drive_upload', {filename: 'mark-lvii-backup.txt', content: 'Mark-LVII backup note'}],
+  ['📍 Find phone', 'phone_location', {refresh: true}],
+  ['🖥️ Screenshot PC', 'screen_process', {action: 'screenshot'}]
+];
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+document.getElementById('qa').innerHTML = QA.map(function(q, i){
+  return '<button onclick="queueAction('+i+')">'+esc(q[0])+'</button>';
+}).join('');
+async function queueAction(i){
+  const q = QA[i];
+  try {
+    const r = await fetch('/api/action', {method:'POST', headers:{'Authorization':'Bearer '+TOK,'Content-Type':'application/json'}, body: JSON.stringify({tool: q[1], args: q[2]})});
+    const d = await r.json();
+    document.getElementById('st').textContent = d.ok ? ('✅ '+q[0]+': queued — Mark will run it.') : ('⚠️ '+(d.error||'queue holo na'));
+  } catch(e){ document.getElementById('st').textContent = '⏳ Server-e pouchate parlam na.'; }
+  load();
+}
+function loadPhone(){ document.getElementById('phone').src = '/api/phone-screen?token='+TOK+'&t='+Date.now(); }
+function loadPc(){ document.getElementById('pc').src = '/api/pc-screen?token='+TOK+'&t='+Date.now(); }
+async function refreshPhone(){
+  document.getElementById('st').textContent = '⏳ Phone-ke bolchi…';
+  try { await fetch('/api/phone-screen/refresh', {method:'POST', headers:{'Authorization':'Bearer '+TOK}}); } catch(e){}
+  setTimeout(loadPhone, 5000);
+}
+async function findPhone(){
+  document.getElementById('st').textContent = '⏳ Phone-er location khujchi…';
+  try {
+    const r = await fetch('/api/location/refresh', {method:'POST', headers:{'Authorization':'Bearer '+TOK}});
+    const d = await r.json();
+    document.getElementById('st').textContent = d.ok ? '✅ Location request pathano holo — koyek second-e asbe.' : ('⚠️ '+(d.error||'holo na'));
+  } catch(e){ document.getElementById('st').textContent = '⏳ Server-e pouchate parlam na.'; }
+  setTimeout(load, 5000);
+}
+async function load(){
+  try {
+    const r = await fetch('/api/main-agent', {headers:{'Authorization':'Bearer '+TOK}});
+    if(!r.ok){ document.getElementById('st').textContent = '⛔ Unauthorized — notun QR/token diye abar kholo.'; return; }
+    const d = await r.json();
+    document.getElementById('st').textContent = '✅ '+new Date().toLocaleTimeString();
+    const m = d.mark||{};
+    document.getElementById('mark').innerHTML = '• Current: '+esc(m.current_task||'Idle')
+      + '<br>• Last reply: '+esc(m.last_response||'—')
+      + '<br>• Queue: '+esc(String(m.queue_len==null?0:m.queue_len))+' pending'
+      + (m.updated_at ? ' • updated '+esc(m.updated_at) : '');
+    const ag = d.agents||[];
+    document.getElementById('agents').textContent = ag.map(function(a){
+      return a.icon+' '+a.name+': '+a.status+(a.status==='working'&&a.current_task?' ('+a.current_task+')':'');
+    }).join(' • ') || '—';
+    const au = d.automation||{};
+    document.getElementById('auto').textContent = '⚡ '+au.total+' automation task ('+au.enabled+' on)'
+      + (au.next_run ? ' • next run '+au.next_run : ' • next run —');
+    const loc = d.location;
+    document.getElementById('loc').textContent = loc
+      ? ('📍 Lat '+loc.lat+', Lng '+loc.lon+' ('+(loc.at||'')+') — 🗺️ google.com/maps?q='+loc.lat+','+loc.lon)
+      : '📍 Phone-er location jani na ekhono — Find phone chapo; phone GPS + Location permission ON thakte hobe.';
+    const pend = d.pending_actions||[];
+    document.getElementById('pend').textContent = pend.length
+      ? ('⏳ Queued: '+pend.map(function(p){ return p.tool; }).join(', '))
+      : 'Queue khali.';
+  } catch(e){
+    document.getElementById('st').textContent = '⏳ Server-e pouchate parlam na — ektu wait koro.';
+  }
+}
+load(); setInterval(load, 2000);
+loadPhone(); setInterval(loadPhone, 4000);
+loadPc(); setInterval(loadPc, 4000);
+</script></body></html>""".replace("__TOK__", tok)
+            return HTMLResponse(html)
+
+        @app.get("/api/pc-screen")
+        async def pc_screen_image(req: Request, token: str = ""):
+            """Latest PC screenshot as a JPEG — captured on demand with mss
+            (the same capture helper jarvis_link uses for the phone's
+            screen_req), saved to memory/pc_screen.jpg.
+
+            Auth: Bearer header or ?token= (browser <img> can't send
+            headers — same as /api/phone-screen). Capture runs in a worker
+            thread so the event loop never blocks. 404 when the capture
+            fails (mss/ImageGrab unavailable on this machine).
+            """
+            if not _auth(req) and not _valid(token.strip()):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import jarvis_link
+                link = jarvis_link.LINK
+                if link is not None:
+                    path = await asyncio.to_thread(link.capture_pc_screen)
+                else:
+                    # Link never attached — capture directly with mss.
+                    def _capture():
+                        try:
+                            import io
+                            import mss
+                            from PIL import Image
+                            with mss.mss() as sct:
+                                shot = sct.grab(sct.monitors[1])
+                            img = Image.frombytes("RGB", shot.size, shot.bgra,
+                                                  "raw", "BGRX")
+                            img.thumbnail((1280, 1280))
+                            p = BASE_DIR / "memory" / "pc_screen.jpg"
+                            p.parent.mkdir(parents=True, exist_ok=True)
+                            img.save(str(p), format="JPEG", quality=80)
+                            return str(p)
+                        except Exception:
+                            return ""
+                    path = await asyncio.to_thread(_capture)
+                if not path or not os.path.exists(path):
+                    return JSONResponse(
+                        {"error": "PC screenshot not available — mss/ImageGrab konotai cholche na."},
+                        status_code=404)
+                return FileResponse(path, media_type="image/jpeg",
+                                    headers={"Cache-Control": "no-store"})
+            except Exception as e:
+                return JSONResponse({"error": str(e)[:120]}, status_code=500)
+
+        @app.get("/api/location")
+        async def location_api(req: Request):
+            """📍 Phone location — last-known fix (never faked).
+
+            {status: "ok"|"unavailable", lat, lon, accuracy, at, address
+            (Nominatim reverse-geocode, only when a fix exists), history
+            (last 20), pc_location: {city, approximate: true}}.
+            No fix → status "unavailable" + the honest message. Bearer
+            auth. Never raises.
+            """
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core.phone_location import (
+                    last_fix, history, reverse_geocode, pc_location)
+                fix = last_fix()
+                pc = pc_location()
+                if not fix:
+                    return JSONResponse({
+                        "status": "unavailable",
+                        "lat": None, "lon": None, "accuracy": None,
+                        "at": None, "address": None,
+                        "message": "location unavailable — turn on phone location",
+                        "history": history(),
+                        "pc_location": pc,
+                    })
+                address = reverse_geocode(fix.get("lat"), fix.get("lon"))
+                return JSONResponse({
+                    "status": "ok",
+                    "lat": fix.get("lat"), "lon": fix.get("lon"),
+                    "accuracy": fix.get("accuracy"),
+                    "at": fix.get("at"), "address": address,
+                    "history": history(),
+                    "pc_location": pc,
+                })
+            except Exception as e:
+                return JSONResponse({"status": "unavailable",
+                                     "lat": None, "lon": None,
+                                     "accuracy": None, "at": None,
+                                     "address": None,
+                                     "message": f"location unavailable — {str(e)[:80]}",
+                                     "history": [], 
+                                     "pc_location": {"city": "unknown",
+                                                     "approximate": True}})
+
+        @app.post("/api/location/refresh")
+        async def location_refresh(req: Request):
+            """Ask the phone for a FRESH location now (background thread).
+            Returns at once — the new fix appears at /api/location when it
+            arrives. Needs the phone paired. Never raises."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import jarvis_link
+                link = jarvis_link.LINK
+                if link is None or not link.paired:
+                    return JSONResponse(
+                        {"error": "Phone pair kora nei — age QR scan koro."},
+                        status_code=409)
+                threading.Thread(target=lambda: link.request_phone_location(),
+                                 daemon=True).start()
+                return JSONResponse({"ok": True,
+                                     "message": "Phone-ke location-er jonno bolchi — koyek second-e asbe."})
+            except Exception as e:
+                return JSONResponse({"error": str(e)[:120]}, status_code=500)
 
         @app.get("/uploads/{filename}")
         async def download_file(filename: str, token: str = ""):

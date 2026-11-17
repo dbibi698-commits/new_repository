@@ -28,7 +28,7 @@ from PyQt6.QtGui import (
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
     QGraphicsScene, QGraphicsView, QGraphicsPixmapItem,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar, QSlider,
@@ -41,7 +41,9 @@ from gui.theme import (
     qcol,
 )
 
-from gui.style import hud_font
+from gui.style import hud_font, mono_font
+
+from core.agents import REGISTRY
 
 
 class SetupOverlay(QWidget):
@@ -1945,6 +1947,7 @@ class JarvisLinkOverlay(QWidget):
     """
 
     closed = pyqtSignal()
+    _render_done = pyqtSignal(str)   # worker thread -> Qt thread: deploy result
 
     _OW, _OH = 440, 730
 
@@ -1961,6 +1964,12 @@ class JarvisLinkOverlay(QWidget):
         """)
         self._shown_code = ""
         self._marked = False
+        # Last Render deploy message + when it was set: _tick (1 s) would
+        # otherwise overwrite the deploy result with the pairing status at
+        # once, so it keeps showing this instead for a while (see _tick).
+        self._render_msg = ""
+        self._render_msg_at = 0.0
+        self._render_done.connect(self._on_render_done)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 16, 24, 16)
@@ -2052,6 +2061,11 @@ class JarvisLinkOverlay(QWidget):
             f"color: #f4b942; background: {C.PANEL2}; border-radius: 8px; padding: 6px;")
         unpair_btn.clicked.connect(self._on_unpair)
         btn_row.addWidget(unpair_btn)
+        self._render_btn = QPushButton("🌐  CONNECT RENDER")
+        self._render_btn.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; border-radius: 8px; padding: 6px;")
+        self._render_btn.clicked.connect(self._on_render_deploy)
+        btn_row.addWidget(self._render_btn)
         lay.addLayout(btn_row)
 
         close_btn = QPushButton("✕  BONDHO KORO")
@@ -2098,6 +2112,7 @@ class JarvisLinkOverlay(QWidget):
         except Exception:
             pass
         self._marked = False
+        self._render_msg = ""
         self._tick()
 
     def _on_unpair(self) -> None:
@@ -2106,7 +2121,81 @@ class JarvisLinkOverlay(QWidget):
         except Exception:
             pass
         self._marked = False
+        self._render_msg = ""
         self._tick()
+
+    # ── 🌐 Render deploy (one click) ─────────────────────────────────────────
+
+    def _resolve_render_deploy(self):
+        """The deploy function main.py defines (render_deploy_sync) — the
+        exact code the render_deploy tool runs. main.py runs as __main__, so
+        take it from there first; only if this module is ever imported some
+        other way fall back to importing main (which would load a second copy
+        of the module — never in the real app). Returns None when unreachable."""
+        try:
+            mod = sys.modules.get("__main__")
+            fn = getattr(mod, "render_deploy_sync", None) if mod is not None else None
+            if callable(fn):
+                return fn
+        except Exception:
+            pass
+        try:
+            from main import render_deploy_sync as _fn
+            return _fn
+        except Exception:
+            return None
+
+    def _on_render_deploy(self) -> None:
+        """Qt thread: disable the button, show "deploy hochhe", and run the
+        deploy on a worker thread — the Qt thread never blocks on the network.
+        The result comes back through the _render_done signal (Qt thread)."""
+        self._render_btn.setEnabled(False)
+        self._render_msg = "⏳ Deploy hochhe…"
+        self._render_msg_at = time.monotonic()
+        self._status_lbl.setText(self._render_msg)
+
+        def _work():
+            fn = self._resolve_render_deploy()
+            if fn is None:
+                res = ("Render deploy trigger pelam na — main.py theke "
+                       "Mark chalao, tarpor abar try koro.")
+            else:
+                try:
+                    res = fn()
+                except Exception as e:
+                    res = f"Render deploy-e error: {e}"
+            self._render_done.emit(str(res))
+
+        threading.Thread(target=_work, daemon=True,
+                         name="mark-render-deploy").start()
+
+    def _on_render_done(self, res: str) -> None:
+        """Qt thread (via _render_done): show the result, re-enable the
+        button. Success also refreshes the Render URL label from config."""
+        try:
+            self._render_btn.setEnabled(True)
+        except Exception:
+            pass
+        if res.startswith("⏳ Render deploy shuru holo"):
+            try:
+                from memory.config_manager import get_plugin_config, load_api_keys
+                _jl = get_plugin_config("jarvis_link")
+                _url = str(_jl.get("render_url") or
+                           load_api_keys().get("render_url") or "").strip()
+            except Exception:
+                _url = ""
+            if _url:
+                self._render_msg = "✅ Deploy shuru holo — " + _url
+            else:
+                self._render_msg = ("✅ Deploy shuru holo — Render URL set korle "
+                                    "ekhane dekhabe (Plugin Settings > 📱 JARVIS LINK "
+                                    "> Render URL).")
+        else:
+            # Includes the no-key case, whose message already says exactly
+            # where to add it (Plugin Settings > 🔗 CONNECTORS > Render API key).
+            self._render_msg = res
+        self._render_msg_at = time.monotonic()
+        self._tick()  # re-reads the Render URL label + shows _render_msg
 
     # ── tick (Qt thread only) ────────────────────────────────────────────────
 
@@ -2167,6 +2256,13 @@ class JarvisLinkOverlay(QWidget):
         else:
             self._status_lbl.setText(
                 "Phone-e Jarvis khule Settings > PC Pairing > Scan PC QR")
+        # A fresh deploy message outranks the pairing status, so the user
+        # actually sees the deploy result instead of it vanishing on the
+        # next 1 s tick; after 90 s the normal status comes back.
+        if self._render_msg and (time.monotonic() - self._render_msg_at) < 90.0:
+            self._status_lbl.setText(self._render_msg)
+        elif self._render_msg:
+            self._render_msg = ""
         self._e2e_lbl.setText(
             "🔒 E2E ON — command encrypted jachhe" if st.get("e2e")
             else "Plaintext — cryptography thakle E2E chalu hobe")
@@ -2179,6 +2275,1700 @@ class JarvisLinkOverlay(QWidget):
             "color: #00ff88; background: #001a0d; border-radius: 10px;")
         self._status_lbl.setText("Phone connected — JARVIS ready")
         self._status_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
+
+    def _do_close(self) -> None:
+        self._timer.stop()
+        self.hide()
+        self.closed.emit()
+
+
+# ── 🔍 FEATURES registry adapter + 💬 ASK MUSE helper ───────────────────────
+# The 13,700,000-feature registry (core/feature_registry.py) landed
+# 2026-11-17 as 1,000,000 (Volume 1), grew to 3,000,000 the same day
+# (Volume 2: numbers 1,000,001-3,000,000) and to 4,000,000 with Volume 3
+# (numbers 3,000,001-4,000,000), then to 6,700,000 with Volume 4
+# (numbers 4,000,001-4,700,000) and Volume 5 (numbers 4,700,001-6,700,000),
+# and to 13,700,000 with Volume 6 (numbers 6,700,001-13,700,000;
+# combinatorial resolve/search). The adapter below
+# builds against its contract — resolve(number)->dict, search(query, limit)->
+# list[dict], list_category(cidx, offset, limit)->list[dict],
+# counts()->{total, WORKING, NEEDS-KEY, NEEDS-DEVICE, PLANNED},
+# set_enabled(number, on), is_enabled(number). The old 20,000-feature JSON
+# (data/features.json) was deleted 2026-11-17 and the _feat_records()
+# fallback below is dead code (plugins/jarvis_features._load_registry no
+# longer exists; it returns [], {} and is never reached while the resolver
+# loads). Enable/disable state falls back to config
+# plugin_config["features"]["disabled"] (a list of numbers) when the
+# resolver has no set_enabled/is_enabled. Nothing here ever raises; every
+# helper returns an empty/neutral value on failure. Coverage is always
+# computed from the registry that actually loaded, so the counter reads
+# the live total — never a hard-coded total.
+
+_MAX_FEATURE_NUMBER = 13_700_000   # run-by-number accepts 1–13,700,000
+
+
+def _feat_registry():
+    """core.feature_registry when the sibling worker has delivered it."""
+    try:
+        import core.feature_registry as _fr  # noqa: F401
+        return _fr
+    except Exception:
+        return None
+
+
+def _feat_records():
+    """(records, by_number) from the 20,000-feature JSON registry."""
+    try:
+        from plugins import jarvis_features as _jf
+        return _jf._load_registry()
+    except Exception:
+        return [], {}
+
+
+def _feat_normalise(rec):
+    """One registry record -> the dict the HUD/dashboard render. Never raises."""
+    try:
+        rec = dict(rec or {})
+        n = int(rec.get("number") or 0)
+        out = {
+            "number": n,
+            "volume": int(rec.get("volume") or 1),
+            "name": str(rec.get("name") or f"Feature #{n}"),
+            "category": str(rec.get("category") or ""),
+            "category_index": int(rec.get("category_index") or 0),
+            "target": str(rec.get("target") or ""),
+            "pattern": str(rec.get("pattern") or ""),
+            "description": str(rec.get("description") or ""),
+            "status": str(rec.get("status") or "PLANNED"),
+            "tool": rec.get("tool"),
+            "requires": str(rec.get("requires") or ""),
+        }
+        out["enabled"] = _feat_is_enabled(n)
+        return out
+    except Exception:
+        return {"number": 0, "name": "?", "category": "", "category_index": 0,
+                "target": "", "pattern": "", "description": "", "status": "PLANNED",
+                "tool": None, "requires": "", "enabled": True}
+
+
+def _feat_resolve(number):
+    try:
+        n = int(number)
+    except (TypeError, ValueError):
+        return None
+    if n < 1 or n > _MAX_FEATURE_NUMBER:
+        return None
+    fr = _feat_registry()
+    if fr is not None and hasattr(fr, "resolve"):
+        try:
+            rec = fr.resolve(n)
+            # The resolver returns {"error": ...} (not None) on bad input
+            # or a missing structure file — treat that as "not found".
+            if isinstance(rec, dict) and rec.get("error"):
+                return None
+            return _feat_normalise(rec) if rec else None
+        except Exception:
+            pass
+    _records, by_number = _feat_records()
+    rec = by_number.get(n)
+    return _feat_normalise(rec) if rec else None
+
+
+def _feat_search(query, limit=20):
+    """Token/phrase search over name+description+category+target+status."""
+    try:
+        limit = max(1, min(100, int(limit or 20)))
+    except Exception:
+        limit = 20
+    q = str(query or "").strip().lower()
+    if not q:
+        # Empty query = browse from the top (the resolver's search
+        # returns [] on an empty query by design).
+        return _feat_first(limit)
+    fr = _feat_registry()
+    if fr is not None and hasattr(fr, "search"):
+        try:
+            return [_feat_normalise(r) for r in (fr.search(q, limit) or [])]
+        except Exception:
+            pass
+    records, _by = _feat_records()
+    import re as _re
+    tokens = [t for t in _re.split(r"\s+", q) if t]
+    scored = []
+    for rec in records:
+        text = " ".join([str(rec.get("name") or ""),
+                         str(rec.get("description") or ""),
+                         str(rec.get("category") or ""),
+                         str(rec.get("target") or ""),
+                         str(rec.get("status") or "")]).lower()
+        hits = sum(1 for t in tokens if t in text)
+        if not hits:
+            continue
+        scored.append((hits + (2 if q in text else 0), rec.get("number") or 0, rec))
+    scored.sort(key=lambda s: (-s[0], s[1]))
+    return [_feat_normalise(r) for _s, _n, r in scored[:limit]]
+
+
+def _feat_list_category(cidx, offset=0, limit=20):
+    try:
+        cidx, offset, limit = int(cidx), max(0, int(offset or 0)), max(1, min(100, int(limit or 20)))
+    except Exception:
+        return []
+    fr = _feat_registry()
+    if fr is not None and hasattr(fr, "list_category"):
+        try:
+            return [_feat_normalise(r) for r in (fr.list_category(cidx, offset, limit) or [])]
+        except Exception:
+            pass
+    records, _by = _feat_records()
+    items = [r for r in records if r.get("category_index") == cidx]
+    return [_feat_normalise(r) for r in items[offset:offset + limit]]
+
+
+def _feat_first(limit=20):
+    """First `limit` features by number — the default browse view."""
+    try:
+        limit = max(1, min(100, int(limit or 20)))
+    except Exception:
+        limit = 20
+    out = []
+    for n in range(1, limit + 1):
+        rec = _feat_resolve(n)
+        if rec:
+            out.append(rec)
+    return out
+
+
+def _feat_categories():
+    """[(index, name)] for all 100 categories, index order."""
+    fr = _feat_registry()
+    if fr is not None and hasattr(fr, "list_categories"):
+        try:
+            cats = [(int(c["index"]), str(c["name"]))
+                    for c in (fr.list_categories() or [])]
+            if cats:
+                return cats
+        except Exception:
+            pass
+    if fr is not None and hasattr(fr, "list_category"):
+        # Fallback: probe the 100 known indices.
+        cats = []
+        for i in range(1, 101):
+            try:
+                rows = fr.list_category(i, 0, 1) or []
+            except Exception:
+                rows = []
+            if rows:
+                cats.append((i, str(rows[0].get("category") or f"Category {i}")))
+        if cats:
+            return cats
+    records, _by = _feat_records()
+    cats = {}
+    for rec in records:
+        try:
+            cats[int(rec.get("category_index") or 0)] = str(rec.get("category") or "")
+        except Exception:
+            pass
+    return [(i, cats[i]) for i in sorted(cats) if i]
+
+
+def _feat_counts():
+    """{total, WORKING, NEEDS-KEY, NEEDS-DEVICE, PLANNED} from the live registry."""
+    fr = _feat_registry()
+    if fr is not None and hasattr(fr, "counts"):
+        try:
+            c = dict(fr.counts() or {})
+            return {"total": int(c.get("total") or 0),
+                    "WORKING": int(c.get("WORKING") or 0),
+                    "NEEDS-KEY": int(c.get("NEEDS-KEY") or 0),
+                    "NEEDS-DEVICE": int(c.get("NEEDS-DEVICE") or 0),
+                    "PLANNED": int(c.get("PLANNED") or 0)}
+        except Exception:
+            pass
+    records, _by = _feat_records()
+    out = {"total": len(records), "WORKING": 0, "NEEDS-KEY": 0,
+           "NEEDS-DEVICE": 0, "PLANNED": 0}
+    for rec in records:
+        st = str(rec.get("status") or "")
+        if st in out:
+            out[st] += 1
+    return out
+
+
+def _feat_disabled_numbers():
+    """Numbers the user switched off, from config plugin_config["features"]."""
+    try:
+        from memory.config_manager import get_plugin_config
+        raw = (get_plugin_config("features") or {}).get("disabled", []) or []
+        return {int(n) for n in raw if str(n).isdigit()}
+    except Exception:
+        return set()
+
+
+def _feat_is_enabled(number):
+    try:
+        n = int(number)
+    except (TypeError, ValueError):
+        return True
+    fr = _feat_registry()
+    if fr is not None and hasattr(fr, "is_enabled"):
+        try:
+            return bool(fr.is_enabled(n))
+        except Exception:
+            pass
+    return n not in _feat_disabled_numbers()
+
+
+def _feat_set_enabled(number, on):
+    """Persist an enable/disable toggle. Returns True on success. Never raises."""
+    try:
+        n = int(number)
+    except (TypeError, ValueError):
+        return False
+    fr = _feat_registry()
+    if fr is not None and hasattr(fr, "set_enabled"):
+        try:
+            fr.set_enabled(n, bool(on))
+            return True
+        except Exception:
+            pass
+    try:
+        from memory.config_manager import get_plugin_config, save_plugin_config
+        disabled = _feat_disabled_numbers()
+        if on:
+            disabled.discard(n)
+        else:
+            disabled.add(n)
+        save_plugin_config("features", {"disabled": sorted(disabled)})
+        return True
+    except Exception:
+        return False
+
+
+def _feat_run(number):
+    """Enqueue a feature run through core/action_queue.py — the same path
+    the HUD quick actions use. Returns (queue_id, record) or ("", None)."""
+    rec = _feat_resolve(number)
+    if rec is None:
+        return "", None
+    try:
+        from core.action_queue import enqueue
+        qid = enqueue("features", {"action": "run", "number": str(rec["number"])})
+    except Exception:
+        qid = ""
+    return qid or "", rec
+
+
+def ask_muse_about_current_work():
+    """💬 ASK MUSE — queue what Mark is currently working on to Muse Bridge.
+
+    instruction = Mark's current_task + last_response (core/mark_status);
+    tried = the currently-working agents (REGISTRY.snapshot). Calls
+    core/muse_bridge.create_task (fast config write, no network — safe on
+    the Qt thread). Returns (task_id or "", message). Never raises.
+    core/muse_bridge.py landed 2026-11-17 (verified live: create -> seen
+    -> done round-trips); when it is missing the message says so instead
+    of crashing."""
+    try:
+        from core.mark_status import snapshot as _ms
+        ms = _ms() or {}
+        cur = str(ms.get("current_task") or "").strip()
+        last = str(ms.get("last_response") or "").strip()
+    except Exception:
+        cur, last = "", ""
+    try:
+        snap = REGISTRY.snapshot()
+        working = [a for a in snap if a.get("status") == "working"]
+        tried = "; ".join(
+            f"{a.get('icon', '')}{a.get('name', '?')}: "
+            f"{str(a.get('current_task') or a.get('job') or '')[:80]}"
+            for a in working) or "No worker agent currently working."
+    except Exception:
+        tried = "Worker agent status unavailable."
+    instruction = ("Mark is working on: "
+                   + (cur or "nothing specific right now (idle)"))
+    if last:
+        instruction += f"\nMark's last reply: {last}"
+    instruction += ("\nHelp Mark finish this — do the work, or explain "
+                    "exactly what is missing (key, device, permission) so "
+                    "Mark can ask the user.")
+    try:
+        from core import muse_bridge as _mb
+        tid = _mb.create_task(instruction, tried=tried,
+                              context="Mark-LVII HUD — Ask Muse")
+    except Exception as e:
+        return "", f"⚠️ Muse-ke task pathate parlam na: {e}"
+    if not tid:
+        return "", "⚠️ Muse-ke task pathate parlam na — bridge khali id dilo na."
+    return str(tid), f"💬 Muse-ke task pathano holo (id {tid})"
+
+
+class FeaturesOverlay(QWidget):
+    """Floating overlay — 🔍 FEATURES: browse the feature registry.
+
+    Search-as-you-type (number + name + status per hit), a category
+    dropdown (100 categories), a status filter, run-by-number (1–13,700,000;
+    ▶ RUN enqueues through core/action_queue.py — the same path the HUD
+    quick actions use — and shows "queued — Mark will run it"), an
+    enable/disable toggle per feature, and a coverage counter from
+    counts(). Follows the AgentsOverlay pattern exactly: _lbl helper,
+    closed pyqtSignal, QTimer poll on the Qt thread, WA_StyledBackground,
+    palette colours only, hud_font/mono_font. Nothing here ever raises
+    out of a slot — a failed registry read shows as a status line.
+    """
+
+    closed = pyqtSignal()
+
+    _OW, _OH = 520, 700
+    _PAGE = 30   # rows shown per refresh
+
+    _DOT = {
+        "WORKING": C.GREEN,
+        "NEEDS-KEY": C.ACC2,
+        "NEEDS-DEVICE": C.ACC,
+        "PLANNED": C.TEXT_DIM,
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            FeaturesOverlay {{
+                background: rgba(0, 4, 12, 0.95);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 14px;
+            }}
+        """)
+        self._results: list[dict] = []
+        self._total_shown = 0
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 16, 24, 16)
+        lay.setSpacing(5)
+
+        def _lbl(txt, fs=9, bold=False, color=C.PRI,
+                 align=Qt.AlignmentFlag.AlignCenter):
+            w = QLabel(txt)
+            w.setAlignment(align)
+            w.setFont(hud_font(fs,
+                            QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            w.setWordWrap(True)
+            return w
+
+        lay.addWidget(_lbl("🔍  FEATURES — sob feature ek jaigai", 12, True))
+        lay.addWidget(_lbl("Search koro, category dekho, number diye chalao — "
+                           "Mark queue theke chalabe", 8, color=C.TEXT_DIM))
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER}; margin: 1px 0;")
+        lay.addWidget(sep)
+
+        self._coverage_lbl = _lbl("", 9, True, color=C.GREEN)
+        lay.addWidget(self._coverage_lbl)
+
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("Search features…  jemon 'YouTube upload'")
+        self._search_input.setFont(hud_font(9))
+        self._search_input.setFixedHeight(30)
+        self._search_input.setStyleSheet(f"""
+            QLineEdit {{
+                background: #000d12; color: {C.TEXT};
+                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px;
+            }}
+            QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
+        """)
+        self._search_input.textChanged.connect(lambda _t: self._refresh())
+        lay.addWidget(self._search_input)
+
+        _combo_css = (
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px; }}"
+            f"QComboBox:hover {{ border-color: {C.BORDER_B}; }}"
+            f"QComboBox QAbstractItemView {{ background: #000d12; color: {C.TEXT}; "
+            f"selection-background-color: {C.PRI_GHO}; border: 1px solid {C.BORDER}; }}"
+        )
+        filt_row = QHBoxLayout(); filt_row.setSpacing(6)
+        self._cat_box = QComboBox()
+        self._cat_box.setFont(hud_font(8))
+        self._cat_box.setFixedHeight(30)
+        self._cat_box.setStyleSheet(_combo_css)
+        self._cat_box.addItem("All categories", 0)
+        for idx, name in _feat_categories():
+            self._cat_box.addItem(f"{idx}. {name}", idx)
+        self._cat_box.currentIndexChanged.connect(lambda _i: self._refresh())
+        filt_row.addWidget(self._cat_box, 2)
+        self._status_box = QComboBox()
+        self._status_box.setFont(hud_font(8))
+        self._status_box.setFixedHeight(30)
+        self._status_box.setStyleSheet(_combo_css)
+        for label, val in [("All statuses", ""), ("WORKING", "WORKING"),
+                           ("NEEDS-KEY", "NEEDS-KEY"),
+                           ("NEEDS-DEVICE", "NEEDS-DEVICE"),
+                           ("PLANNED", "PLANNED")]:
+            self._status_box.addItem(label, val)
+        self._status_box.currentIndexChanged.connect(lambda _i: self._refresh())
+        filt_row.addWidget(self._status_box, 1)
+        lay.addLayout(filt_row)
+
+        # Scrollable results — rebuilt on every filter change.
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet("background: transparent; border: none;")
+        self._list_widget = QWidget()
+        self._list_widget.setStyleSheet("background: transparent;")
+        self._list_lay = QVBoxLayout(self._list_widget)
+        self._list_lay.setContentsMargins(0, 0, 0, 0)
+        self._list_lay.setSpacing(4)
+        self._list_lay.addStretch()
+        self._scroll.setWidget(self._list_widget)
+        lay.addWidget(self._scroll, 1)
+
+        self._shown_lbl = _lbl("", 8, color=C.TEXT_DIM)
+        lay.addWidget(self._shown_lbl)
+
+        # Run by number.
+        run_row = QHBoxLayout(); run_row.setSpacing(6)
+        run_row.addWidget(_lbl("RUN BY NUMBER", 8, color=C.TEXT_DIM,
+                               align=Qt.AlignmentFlag.AlignLeft))
+        self._num_input = QLineEdit()
+        self._num_input.setPlaceholderText("1 – 13700000")
+        self._num_input.setFont(mono_font(9))
+        self._num_input.setFixedHeight(30)
+        self._num_input.setStyleSheet(f"""
+            QLineEdit {{
+                background: #000d12; color: {C.TEXT};
+                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px;
+            }}
+            QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
+        """)
+        self._num_input.returnPressed.connect(self._on_run_number)
+        run_row.addWidget(self._num_input, 1)
+        run_btn = QPushButton("▶  RUN")
+        run_btn.setFixedHeight(30)
+        run_btn.setFont(hud_font(9, QFont.Weight.Bold))
+        run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        run_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; padding: 4px 14px;
+            }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
+        """)
+        run_btn.clicked.connect(self._on_run_number)
+        run_row.addWidget(run_btn)
+        lay.addLayout(run_row)
+
+        self._status_lbl = _lbl("", 8, color=C.GREEN)
+        lay.addWidget(self._status_lbl)
+
+        close_btn = QPushButton("✕  BONDHO KORO")
+        close_btn.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent; padding: 4px;")
+        close_btn.clicked.connect(self._do_close)
+        lay.addWidget(close_btn)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(2000)
+        self._refresh()
+
+    # ── actions (Qt thread only; registry reads are in-memory) ─────────────
+
+    def _on_toggle(self, number: int, btn: QPushButton) -> None:
+        try:
+            on = not _feat_is_enabled(number)
+            if _feat_set_enabled(number, on):
+                self._style_toggle(btn, on)
+                self._status_lbl.setText(
+                    f"#{number} {'ON korlam' if on else 'OFF korlam'}.")
+            else:
+                self._status_lbl.setText(f"⚠️ #{number} toggle korte parlam na.")
+        except Exception:
+            self._status_lbl.setText("⚠️ Toggle korte parlam na.")
+
+    def _on_run_row(self, number: int, name: str, status: str) -> None:
+        try:
+            qid, _rec = _feat_run(number)
+        except Exception:
+            qid = ""
+        if qid:
+            note = (" — PLANNED/NEEDS-DEVICE hole Mark ki missing seta bolbe."
+                    if status in ("PLANNED", "NEEDS-DEVICE") else "")
+            self._status_lbl.setText(
+                f"✅ #{number} {name}: queued — Mark will run it (#{qid}).{note}")
+        else:
+            self._status_lbl.setText(
+                f"⚠️ #{number}: queue-te dite parlam na — abar try koro.")
+
+    def _on_run_number(self) -> None:
+        raw = self._num_input.text().strip()
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            self._status_lbl.setText("⚠️ Number dao — 1 theke 13700000-er modhye.")
+            return
+        if n < 1 or n > _MAX_FEATURE_NUMBER:
+            self._status_lbl.setText("⚠️ Number dao — 1 theke 13700000-er modhye.")
+            return
+        rec = _feat_resolve(n)
+        if rec is None:
+            total = _feat_counts().get("total") or 0
+            self._status_lbl.setText(
+                f"⚠️ #{n} registry-te nei — registry-te ekhon {total:,} ta feature.")
+            return
+        self._on_run_row(n, rec.get("name") or "", rec.get("status") or "")
+
+    # ── build / tick (Qt thread only) ────────────────────────────────────────
+
+    @staticmethod
+    def _style_toggle(btn: QPushButton, enabled: bool):
+        if enabled:
+            btn.setText("ON")
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #001a08; color: {C.GREEN};
+                    border: 1px solid {C.GREEN_D}; border-radius: 3px;
+                }}
+                QPushButton:hover {{ background: #002010; }}
+            """)
+        else:
+            btn.setText("OFF")
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent; color: {C.TEXT_DIM};
+                    border: 1px solid {C.BORDER}; border-radius: 3px;
+                }}
+                QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+            """)
+
+    def _clear_list(self):
+        while self._list_lay.count():
+            item = self._list_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+
+    def _refresh(self) -> None:
+        """Rebuild the result rows from the current filters. Never raises."""
+        try:
+            q = self._search_input.text().strip()
+            cidx = int(self._cat_box.currentData() or 0)
+            status = str(self._status_box.currentData() or "")
+            if q:
+                items = _feat_search(q, 100)
+            elif cidx:
+                items = _feat_list_category(cidx, 0, 100)
+            else:
+                items = _feat_first(100)
+            if cidx:
+                items = [r for r in items if r.get("category_index") == cidx]
+            if status:
+                items = [r for r in items if r.get("status") == status]
+            self._total_shown = len(items)
+            self._results = items[: self._PAGE]
+            self._clear_list()
+            if not self._results:
+                empty = QLabel("Kono feature milche na — search ba filter bodle dekho.")
+                empty.setWordWrap(True)
+                empty.setFont(hud_font(8))
+                empty.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+                self._list_lay.addWidget(empty)
+            for rec in self._results:
+                self._list_lay.addWidget(self._build_row(rec))
+            self._list_lay.addStretch()
+            self._shown_lbl.setText(
+                f"Showing {len(self._results)} of {self._total_shown} match"
+                + ("es" if self._total_shown != 1 else ""))
+        except Exception:
+            pass
+        self._update_coverage()
+
+    def _build_row(self, rec: dict) -> QFrame:
+        frame = QFrame()
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: {C.PANEL2};
+                border: 1px solid {C.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+        flay = QHBoxLayout(frame)
+        flay.setContentsMargins(10, 6, 10, 6)
+        flay.setSpacing(6)
+
+        n = int(rec.get("number") or 0)
+        st = str(rec.get("status") or "PLANNED")
+        dot = QLabel("●")
+        dot.setFont(hud_font(9))
+        dot.setStyleSheet(
+            f"color: {self._DOT.get(st, C.TEXT_DIM)}; background: transparent;")
+        flay.addWidget(dot)
+
+        name = QLabel(f"#{n}  {rec.get('name') or ''}")
+        name.setFont(hud_font(9, QFont.Weight.Bold))
+        name.setStyleSheet(
+            f"color: {C.TEXT if rec.get('enabled', True) else C.TEXT_DIM};"
+            " background: transparent;")
+        name.setWordWrap(False)
+        fm = name.fontMetrics()
+        name.setText(fm.elidedText(f"#{n}  {rec.get('name') or ''}",
+                                   Qt.TextElideMode.ElideRight, 260))
+        name.setToolTip(f"{rec.get('name') or ''} [{st}] — "
+                        f"{rec.get('category') or ''}")
+        flay.addWidget(name, 1)
+
+        badge = QLabel(st)
+        badge.setFont(hud_font(7, QFont.Weight.Bold))
+        badge.setStyleSheet(
+            f"color: {self._DOT.get(st, C.TEXT_DIM)}; background: transparent;")
+        flay.addWidget(badge)
+
+        tog = QPushButton()
+        tog.setFixedSize(52, 24)
+        tog.setFont(hud_font(7, QFont.Weight.Bold))
+        tog.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._style_toggle(tog, bool(rec.get("enabled", True)))
+        tog.clicked.connect(lambda _c, num=n, b=tog: self._on_toggle(num, b))
+        flay.addWidget(tog)
+
+        run_b = QPushButton("▶ RUN")
+        run_b.setFixedSize(52, 24)
+        run_b.setFont(hud_font(7, QFont.Weight.Bold))
+        run_b.setCursor(Qt.CursorShape.PointingHandCursor)
+        run_b.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px;
+            }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; }}
+        """)
+        run_b.clicked.connect(
+            lambda _c, num=n, nm=rec.get("name") or "", s=st:
+                self._on_run_row(num, nm, s))
+        flay.addWidget(run_b)
+        return frame
+
+    def _update_coverage(self) -> None:
+        try:
+            c = _feat_counts()
+            total = int(c.get("total") or 0)
+            working = int(c.get("WORKING") or 0)
+            self._coverage_lbl.setText(
+                f"{working:,} / {total:,} working"
+                f"   •   NEEDS-KEY {int(c.get('NEEDS-KEY') or 0):,}  •  "
+                f"NEEDS-DEVICE {int(c.get('NEEDS-DEVICE') or 0):,}  •  "
+                f"PLANNED {int(c.get('PLANNED') or 0):,}")
+        except Exception:
+            pass
+
+    def _tick(self) -> None:
+        """2 s poll: coverage only — the list rebuilds on filter change."""
+        self._update_coverage()
+
+    def _do_close(self) -> None:
+        self._timer.stop()
+        self.hide()
+        self.closed.emit()
+
+
+class AgentsOverlay(QWidget):
+    """Floating overlay — the 7 worker agents, live: what each is doing,
+    its status, how long it has been working, how much is done.
+
+    Reads core.agents.REGISTRY.snapshot() on a 1 s QTimer on the Qt thread
+    (same pattern as JarvisLinkOverlay._tick); worker threads never touch
+    these widgets. core.agents imports no Qt.
+    """
+
+    closed = pyqtSignal()
+
+    _OW, _OH = 460, 640
+
+    # Status dot colours — all from the C palette. The palette has no grey,
+    # so idle uses the dimmest text colour (TEXT_DIM) as its "off" grey.
+    _DOT = {
+        "idle": C.TEXT_DIM,
+        "working": C.PRI,
+        "done": C.GREEN,
+        "error": C.RED,
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            AgentsOverlay {{
+                background: rgba(0, 4, 12, 0.95);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 14px;
+            }}
+        """)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 16, 24, 16)
+        lay.setSpacing(5)
+
+        def _lbl(txt, fs=9, bold=False, color=C.PRI,
+                 align=Qt.AlignmentFlag.AlignCenter):
+            w = QLabel(txt)
+            w.setAlignment(align)
+            w.setFont(hud_font(fs,
+                            QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            w.setWordWrap(True)
+            return w
+
+        lay.addWidget(_lbl("🤖  AGENTS — Mark-er 7 worker", 12, True))
+        lay.addWidget(_lbl("Ke ki korche, kotokkhon dhore, kotota sesh — live",
+                           8, color=C.TEXT_DIM))
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER}; margin: 1px 0;")
+        lay.addWidget(sep)
+
+        # One row per agent, built from AGENT_DEFS order so the panel and
+        # the registry can never drift apart.
+        from core.agents import AGENT_DEFS
+        self._rows = {}
+        for a in AGENT_DEFS:
+            frame = QFrame()
+            frame.setStyleSheet(f"""
+                QFrame {{
+                    background: {C.PANEL2};
+                    border: 1px solid {C.BORDER};
+                    border-radius: 8px;
+                }}
+            """)
+            flay = QVBoxLayout(frame)
+            flay.setContentsMargins(10, 6, 10, 6)
+            flay.setSpacing(2)
+
+            top = QHBoxLayout()
+            top.setSpacing(6)
+            dot = QLabel("●")
+            dot.setFont(hud_font(10))
+            dot.setStyleSheet(
+                f"color: {self._DOT['idle']}; background: transparent;")
+            top.addWidget(dot)
+            name = QLabel(f"{a['icon']}  {a['name']}")
+            name.setFont(hud_font(10, QFont.Weight.Bold))
+            name.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+            top.addWidget(name)
+            top.addStretch()
+            elapsed = QLabel("00:00")
+            elapsed.setFont(mono_font(9))
+            elapsed.setStyleSheet(
+                f"color: {C.TEXT_MED}; background: transparent;")
+            top.addWidget(elapsed)
+            count = QLabel("✓ 0")
+            count.setFont(hud_font(9, QFont.Weight.Bold))
+            count.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
+            top.addWidget(count)
+            flay.addLayout(top)
+
+            task = QLabel(a["job"])
+            task.setFont(hud_font(8))
+            task.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            task.setWordWrap(False)
+            flay.addWidget(task)
+
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(7)
+            bar.setStyleSheet(f"""
+                QProgressBar {{
+                    background: {C.BAR_BG};
+                    border: 1px solid {C.BORDER};
+                    border-radius: 3px;
+                }}
+                QProgressBar::chunk {{
+                    background: {C.PRI};
+                    border-radius: 3px;
+                }}
+            """)
+            flay.addWidget(bar)
+
+            lay.addWidget(frame)
+            self._rows[a["id"]] = {
+                "dot": dot, "name": name, "elapsed": elapsed,
+                "count": count, "task": task, "bar": bar,
+                "job": a["job"],
+            }
+
+        lay.addStretch()
+
+        close_btn = QPushButton("✕  BONDHO KORO")
+        close_btn.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent; padding: 4px;")
+        close_btn.clicked.connect(self._do_close)
+        lay.addWidget(close_btn)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(1000)
+        self._tick()
+
+    # ── tick (Qt thread only) ────────────────────────────────────────────────
+
+    @staticmethod
+    def _fmt_elapsed(seconds: float) -> str:
+        total = max(0, int(seconds))
+        return f"{total // 60:02d}:{total % 60:02d}"
+
+    def _tick(self) -> None:
+        try:
+            snap = REGISTRY.snapshot()
+        except Exception:
+            return
+        for a in snap:
+            row = self._rows.get(a["id"])
+            if row is None:
+                continue
+            status = a.get("status", "idle")
+            row["dot"].setStyleSheet(
+                f"color: {self._DOT.get(status, C.TEXT_DIM)};"
+                " background: transparent;")
+            if not a.get("enabled", True):
+                row["name"].setStyleSheet(
+                    f"color: {C.TEXT_DIM}; background: transparent;")
+                row["task"].setText("Disabled in Settings")
+            else:
+                row["name"].setStyleSheet(
+                    f"color: {C.PRI}; background: transparent;")
+                task = (a.get("current_task") or "").strip()
+                if status == "working" and task:
+                    shown = task
+                elif status == "done":
+                    shown = "✓ " + (task or row["job"])
+                elif status == "error":
+                    shown = "⚠ " + (task or row["job"])
+                else:
+                    shown = row["job"]
+                fm = row["task"].fontMetrics()
+                row["task"].setText(
+                    fm.elidedText(shown, Qt.TextElideMode.ElideRight, 400))
+            row["elapsed"].setText(self._fmt_elapsed(a.get("elapsed_s", 0.0)))
+            row["count"].setText(f"✓ {int(a.get('completed_count', 0))}")
+            row["bar"].setValue(max(0, min(100, int(a.get("progress", 0)))))
+
+    def _do_close(self) -> None:
+        self._timer.stop()
+        self.hide()
+        self.closed.emit()
+
+
+# ── ⚡ AUTOMATION + 🧠 MAIN AGENT overlays ───────────────────────────────────
+# Both follow the AgentsOverlay pattern exactly: Qt widgets only on the Qt
+# thread, a QTimer poll reads thread-safe state (ENGINE / REGISTRY /
+# mark_status / action_queue), and every slow call (run-now, template
+# create, phone/PC screen fetch, location request) runs on a worker thread
+# and reports back through a pyqtSignal. Nothing here ever raises out of
+# a slot — a failed engine call shows as a status line, never a crash.
+# Edit of a task happens on the dashboard page (/automation form) — this
+# HUD has no edit dialog, by design.
+
+_TEMPLATES = [
+    ("morning_briefing", "🌅 Morning briefing"),
+    ("daily_backup", "💾 Daily backup"),
+    ("evening_upload", "🌆 Evening upload"),
+    ("weekly_drive_sync", "☁️ Weekly Drive sync"),
+    ("social_post_fixed_time", "📣 Social post (fixed time)"),
+]
+
+
+def _trigger_text(trigger: dict) -> str:
+    """One short line for a trigger dict. Never raises."""
+    try:
+        trig = dict(trigger or {})
+        ttype = str(trig.get("type") or "?").strip().lower()
+        if ttype == "time":
+            kind = str(trig.get("kind") or "")
+            when = str(trig.get("time") or "")
+            extra = ""
+            if kind == "once":
+                extra = f" {trig.get('date') or trig.get('at') or ''}"
+            elif kind == "weekly":
+                extra = f" weekday {trig.get('weekday')}"
+            return f"🕐 {kind or 'time'} {when}{extra}".strip()
+        if ttype == "interval":
+            return f"🔁 every {trig.get('every')} {trig.get('unit') or 'minutes'}"
+        if ttype == "keyword":
+            return f"💬 keyword '{trig.get('phrase')}'"
+        if ttype == "event":
+            return f"⚡ event '{trig.get('name')}'"
+        if ttype == "webhook":
+            return "🌐 webhook (dashboard only)"
+        return ttype or "?"
+    except Exception:
+        return "?"
+
+
+def _countdown(next_run) -> str:
+    """hh:mm:ss until next_run (ISO), or '—' when there is none / it passed."""
+    try:
+        from datetime import datetime
+        if not next_run:
+            return "—"
+        nxt = datetime.fromisoformat(str(next_run))
+        delta = (nxt - datetime.now()).total_seconds()
+        if delta <= 0:
+            return "due now"
+        total = int(delta)
+        return f"{total // 3600:02d}:{(total % 3600) // 60:02d}:{total % 60:02d}"
+    except Exception:
+        return "—"
+
+
+class AutomationOverlay(QWidget):
+    """Floating overlay — ⚡ AUTOMATION: the task engine's visual flow view.
+
+    Each task card shows Trigger block → Action blocks (step tool names in
+    order) → Condition badge, next-run countdown, last-run result from
+    ENGINE.history(), an enable/disable toggle, a run-now button and a
+    delete button. Recipe templates below create a real task in one click.
+    Edit lives on the dashboard page (/automation form) — no edit dialog
+    here. Polls ENGINE on a 2 s QTimer; the card list rebuilds only when
+    the task/history fingerprint changes, so buttons never flicker.
+    """
+
+    closed = pyqtSignal()
+    _run_done = pyqtSignal(str)   # worker thread -> Qt thread: run result
+
+    _OW, _OH = 460, 640
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            AutomationOverlay {{
+                background: rgba(0, 4, 12, 0.95);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 14px;
+            }}
+        """)
+        self._fingerprint = None
+        self._status_msg = ""
+        self._status_at = 0.0
+        self._run_done.connect(self._on_run_done)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 16, 24, 16)
+        lay.setSpacing(5)
+
+        def _lbl(txt, fs=9, bold=False, color=C.PRI,
+                 align=Qt.AlignmentFlag.AlignCenter):
+            w = QLabel(txt)
+            w.setAlignment(align)
+            w.setFont(hud_font(fs,
+                            QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            w.setWordWrap(True)
+            return w
+
+        lay.addWidget(_lbl("⚡  AUTOMATION — scheduled tasks", 12, True))
+        lay.addWidget(_lbl("Trigger → steps → condition — live, dashboard-e edit koro",
+                           8, color=C.TEXT_DIM))
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER}; margin: 1px 0;")
+        lay.addWidget(sep)
+
+        self._summary_lbl = _lbl("", 8, color=C.TEXT_DIM)
+        lay.addWidget(self._summary_lbl)
+
+        # Scrollable task list — rebuilt only when the fingerprint changes.
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet(
+            f"background: transparent; border: none;")
+        self._list_widget = QWidget()
+        self._list_widget.setStyleSheet("background: transparent;")
+        self._list_lay = QVBoxLayout(self._list_widget)
+        self._list_lay.setContentsMargins(0, 0, 0, 0)
+        self._list_lay.setSpacing(6)
+        self._list_lay.addStretch()
+        self._scroll.setWidget(self._list_widget)
+        lay.addWidget(self._scroll, 1)
+
+        lay.addWidget(_lbl("🍳  RECIPE TEMPLATES — ek click-e task banao",
+                           9, True, color=C.PRI))
+        tpl_row = QHBoxLayout()
+        tpl_row.setSpacing(4)
+        for key, label in _TEMPLATES:
+            b = QPushButton(label)
+            b.setFont(hud_font(7))
+            b.setStyleSheet(
+                f"color: {C.PRI}; background: {C.PANEL2}; "
+                f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 5px")
+            b.clicked.connect(lambda _c, k=key: self._on_template(k))
+            tpl_row.addWidget(b)
+        lay.addLayout(tpl_row)
+
+        self._status_lbl = _lbl("", 8, color=C.GREEN)
+        lay.addWidget(self._status_lbl)
+
+        close_btn = QPushButton("✕  BONDHO KORO")
+        close_btn.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent; padding: 4px;")
+        close_btn.clicked.connect(self._do_close)
+        lay.addWidget(close_btn)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(2000)
+        self._tick()
+
+    # ── actions (Qt thread starts them; slow work on a worker thread) ───────
+
+    def _on_toggle(self, task_id: str, on: bool) -> None:
+        try:
+            from core.automation import ENGINE
+            ok = ENGINE.set_enabled(task_id, on)
+            self._show_status(
+                f"{'✅ Task on korlam' if on else '⏸️ Task off korlam'}"
+                if ok else "⚠️ Task-ta pelam na.")
+        except Exception:
+            self._show_status("⚠️ Toggle korte parlam na.")
+        self._tick(force=True)
+
+    def _on_run_now(self, task_id: str, name: str) -> None:
+        self._show_status(f"⏳ '{name}' cholche…")
+
+        def _work():
+            try:
+                from core.automation import ENGINE
+                res = ENGINE.run_task_now(task_id)
+            except Exception as e:
+                res = f"Run korte parlam na: {e}"
+            self._run_done.emit(str(res)[:300])
+
+        threading.Thread(target=_work, daemon=True,
+                         name="automation-run-now").start()
+
+    def _on_delete(self, task_id: str, name: str) -> None:
+        try:
+            from core.automation import ENGINE
+            ok = ENGINE.delete_task(task_id)
+            self._show_status(
+                f"🗑️ '{name}' delete korlam." if ok
+                else "⚠️ Task-ta pelam na.")
+        except Exception:
+            self._show_status("⚠️ Delete korte parlam na.")
+        self._tick(force=True)
+
+    def _on_template(self, key: str) -> None:
+        self._show_status(f"⏳ Template '{key}' theke task banachhi…")
+
+        def _work():
+            try:
+                from core.automation import ENGINE
+                tid = ENGINE.create_from_template(key)
+                res = (f"✅ Template '{key}' theke task toiri (id {tid})."
+                       if tid else f"⚠️ Template '{key}' chinlam na.")
+            except Exception as e:
+                res = f"Template banate parlam na: {e}"
+            self._run_done.emit(res)
+
+        threading.Thread(target=_work, daemon=True,
+                         name="automation-template").start()
+
+    def _on_run_done(self, res: str) -> None:
+        """Qt thread (via _run_done): show the worker result, refresh."""
+        self._show_status(res)
+        self._tick(force=True)
+
+    def _show_status(self, msg: str) -> None:
+        self._status_msg = str(msg or "")[:300]
+        self._status_at = time.monotonic()
+        self._status_lbl.setText(self._status_msg)
+
+    # ── build / tick (Qt thread only) ────────────────────────────────────────
+
+    def _build_card(self, task: dict, last: dict | None) -> QFrame:
+        frame = QFrame()
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: {C.PANEL2};
+                border: 1px solid {C.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+        flay = QVBoxLayout(frame)
+        flay.setContentsMargins(10, 6, 10, 6)
+        flay.setSpacing(3)
+
+        def _l(txt, fs=9, bold=False, color=C.PRI,
+               align=Qt.AlignmentFlag.AlignLeft):
+            w = QLabel(txt)
+            w.setAlignment(align)
+            w.setFont(hud_font(fs,
+                            QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            w.setWordWrap(True)
+            return w
+
+        top = QHBoxLayout()
+        name = _l(f"{'🟢' if task.get('enabled') else '⚪'}  "
+                  f"{task.get('name') or '?'}", 10, True)
+        top.addWidget(name, 1)
+        nxt = _l("⏭ " + _countdown(task.get("next_run")), 8,
+                 color=C.TEXT_MED)
+        top.addWidget(nxt)
+        flay.addLayout(top)
+
+        # Visual flow: Trigger block → Action blocks → Condition badge.
+        steps = [str(s.get("tool") or "?") for s in (task.get("steps") or [])]
+        flow = _trigger_text(task.get("trigger") or {})
+        flow += "  ➜  " + ("  ➜  ".join(steps) if steps else "no steps")
+        cond = task.get("condition") or {}
+        if cond:
+            ctype = str(cond.get("type") or "?")
+            extra = (f" {cond.get('minutes')} min"
+                     if ctype == "idle" and cond.get("minutes") else "")
+            flow += f"   [only if: {ctype}{extra}]"
+        flay.addWidget(_l(flow, 8, color=C.TEXT_DIM))
+
+        last_txt = "last run: —"
+        if last:
+            st = str(last.get("status") or "?")
+            when = str(last.get("finished_at") or last.get("started_at") or "")
+            note = str(last.get("note") or "")[:80]
+            last_txt = (f"last run: {'✅' if st == 'ok' else '❌'} {st} {when}"
+                        + (f" — {note}" if note else ""))
+        flay.addWidget(_l(last_txt, 8, color=C.TEXT_MED))
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(4)
+
+        def _btn(txt, color=C.PRI):
+            b = QPushButton(txt)
+            b.setFont(hud_font(8))
+            b.setStyleSheet(
+                f"color: {color}; background: {C.PANEL2}; "
+                f"border: 1px solid {C.BORDER}; border-radius: 6px; padding: 4px")
+            return b
+
+        tid = str(task.get("id") or "")
+        tname = str(task.get("name") or "?")
+        tog = _btn("⏸ OFF" if task.get("enabled") else "▶ ON",
+                   C.GREEN if not task.get("enabled") else C.TEXT_MED)
+        tog.clicked.connect(
+            lambda _c, i=tid, on=not bool(task.get("enabled")):
+            self._on_toggle(i, on))
+        btn_row.addWidget(tog)
+        run_b = _btn("▶ RUN NOW", C.ACC)
+        run_b.clicked.connect(lambda _c, i=tid, n=tname: self._on_run_now(i, n))
+        btn_row.addWidget(run_b)
+        del_b = _btn("🗑 DELETE", C.RED)
+        del_b.clicked.connect(lambda _c, i=tid, n=tname: self._on_delete(i, n))
+        btn_row.addWidget(del_b)
+        btn_row.addStretch()
+        flay.addLayout(btn_row)
+        return frame
+
+    def _tick(self, force: bool = False) -> None:
+        try:
+            from core.automation import ENGINE
+            tasks = ENGINE.list_tasks()
+            hist = ENGINE.history()
+        except Exception:
+            return
+        try:
+            last_by_task = {}
+            for h in hist:
+                last_by_task[h.get("task_id")] = h
+            import json as _json
+            fp = _json.dumps(
+                [(t.get("id"), t.get("name"), t.get("enabled"),
+                  t.get("next_run"), _trigger_text(t.get("trigger") or {}),
+                  [s.get("tool") for s in (t.get("steps") or [])],
+                  t.get("condition")) for t in tasks]
+                + [(h.get("task_id"), h.get("status"), h.get("finished_at"))
+                   for h in hist[-10:]],
+                sort_keys=True, default=str)
+            if not force and fp == self._fingerprint:
+                # Same tasks — only the countdowns age: update the summary
+                # line (cheap) and leave the cards alone.
+                self._update_summary(tasks)
+                return
+            self._fingerprint = fp
+            # Rebuild the list (drop the trailing stretch, re-add after).
+            while self._list_lay.count():
+                item = self._list_lay.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
+            if not tasks:
+                empty = QLabel("Kono automation task nei ekhono.\n"
+                               "Nicher template theke ekta banao, ba dashboard-e "
+                               "/automation khule notun task likho.")
+                empty.setFont(hud_font(8))
+                empty.setStyleSheet(
+                    f"color: {C.TEXT_DIM}; background: transparent;")
+                empty.setWordWrap(True)
+                self._list_lay.addWidget(empty)
+            for t in tasks:
+                self._list_lay.addWidget(
+                    self._build_card(t, last_by_task.get(t.get("id"))))
+            self._list_lay.addStretch()
+            self._update_summary(tasks)
+        except Exception:
+            return
+
+    def _update_summary(self, tasks: list) -> None:
+        try:
+            on = sum(1 for t in tasks if t.get("enabled"))
+            nxts = [t.get("next_run") for t in tasks
+                    if t.get("enabled") and t.get("next_run")]
+            nxt_txt = "—"
+            if nxts:
+                nxt_txt = "⏭ " + _countdown(min(nxts))
+            self._summary_lbl.setText(
+                f"{len(tasks)} task ({on} on) • next run {nxt_txt} • "
+                "edit: dashboard /automation")
+        except Exception:
+            pass
+
+    def _do_close(self) -> None:
+        self._timer.stop()
+        self.hide()
+        self.closed.emit()
+
+
+class MainAgentOverlay(QWidget):
+    """Floating overlay — 🧠 MAIN AGENT: Mark's master screen.
+
+    Sections: (1) Mark's live status (core/mark_status.py — current task,
+    last reply, queue length); (2) one-line summary of all 7 agents
+    (REGISTRY.snapshot) + all automation tasks (ENGINE counts + next run);
+    (3) PHONE SCREEN — memory/phone_screen.jpg, re-polled every 4 s, with
+    a Refresh button (worker thread calls link.fetch_phone_screen);
+    (4) PC SCREEN — this PC's own screen via mss (the same capture helper
+    jarvis_link uses for the phone's screen_req — no duplicate code), with
+    a Refresh button; (5) LOCATION — last-known phone location + Find phone
+    button; (6) quick actions — every button ENQUEUES through
+    core/action_queue.py and shows "queued — Mark will run it" (main.py
+    drains the queue at integration; the HUD never calls a tool directly).
+    Polls on a 1 s QTimer; screens re-poll every 4 s.
+    """
+
+    closed = pyqtSignal()
+    _worker_done = pyqtSignal(str, str)   # (kind, message) -> Qt thread
+
+    _OW, _OH = 520, 700
+
+    # Quick actions: (button label, tool name, args). All go through the
+    # action queue — nothing here calls a tool directly.
+    _QUICK_ACTIONS = [
+        ("📱 Open app", "open_app", {"app": "Calculator"}),
+        ("🎬 Upload video", "youtube_upload",
+         {"file_path": "", "title": "Today's video"}),
+        ("💬 Send WhatsApp", "whatsapp_send",
+         {"to": "", "message": ""}),
+        ("💾 Backup", "drive_upload",
+         {"filename": "mark-lvii-backup.txt",
+          "content": "Mark-LVII backup note"}),
+        ("📍 Find phone", "phone_location", {"refresh": True}),
+        ("🖥️ Screenshot PC", "screen_process", {"action": "screenshot"}),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            MainAgentOverlay {{
+                background: rgba(0, 4, 12, 0.95);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 14px;
+            }}
+        """)
+        self._phone_mtime = -1.0
+        self._pc_mtime = -1.0
+        self._tick_count = 0
+        self._worker_done.connect(self._on_worker_done)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 16, 24, 16)
+        outer.setSpacing(5)
+
+        def _lbl(txt, fs=9, bold=False, color=C.PRI,
+                 align=Qt.AlignmentFlag.AlignCenter):
+            w = QLabel(txt)
+            w.setAlignment(align)
+            w.setFont(hud_font(fs,
+                            QFont.Weight.Bold if bold else QFont.Weight.Normal))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            w.setWordWrap(True)
+            return w
+
+        outer.addWidget(_lbl("🧠  MAIN AGENT — Mark-er master screen", 12, True))
+        outer.addWidget(_lbl("Mark + 7 agent + automation + phone/PC screen + location — sob ek jaigai",
+                             8, color=C.TEXT_DIM))
+        # 👤 Guest mode — shown when core.cat09_security says it is on;
+        # read on the tick so it follows a Settings change. Never raises.
+        self._guest_lbl = _lbl("", 8, True, color=C.ACC2)
+        outer.addWidget(self._guest_lbl)
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER}; margin: 1px 0;")
+        outer.addWidget(sep)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("background: transparent; border: none;")
+        body = QWidget()
+        body.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+
+        def _section(title: str):
+            lay.addWidget(_lbl(title, 10, True, align=Qt.AlignmentFlag.AlignLeft))
+
+        def _txt(fs=9, color=C.PRI):
+            w = QLabel("")
+            w.setFont(hud_font(fs))
+            w.setStyleSheet(f"color: {color}; background: transparent;")
+            w.setWordWrap(True)
+            w.setAlignment(Qt.AlignmentFlag.AlignLeft)
+            return w
+
+        # (1) Mark live status
+        _section("🧠  Mark — live status")
+        self._mark_lbl = _txt(9)
+        lay.addWidget(self._mark_lbl)
+
+        # (2) Agents + automation, one line each
+        _section("🤖  7 worker agent + ⚡ automation")
+        self._agents_lbl = _txt(8, C.TEXT_DIM)
+        lay.addWidget(self._agents_lbl)
+        self._auto_lbl = _txt(8, C.TEXT_DIM)
+        lay.addWidget(self._auto_lbl)
+
+        # (3) Phone screen
+        _section("📱  PHONE SCREEN (still image, 4 s-e refresh)")
+        self._phone_img = QLabel("Phone screen ekhono ashe ni — Refresh chapo.")
+        self._phone_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._phone_img.setFont(hud_font(8))
+        self._phone_img.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: {C.PANEL2}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 8px;")
+        self._phone_img.setMinimumHeight(120)
+        lay.addWidget(self._phone_img)
+        row = QHBoxLayout()
+        b = QPushButton("🔄  Refresh phone screen")
+        b.setFont(hud_font(8))
+        b.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; border-radius: 8px; padding: 5px;")
+        b.clicked.connect(self._on_refresh_phone)
+        row.addWidget(b)
+        row.addStretch()
+        lay.addLayout(row)
+
+        # (4) PC screen
+        _section("🖥️  PC SCREEN (ei PC-r screen)")
+        self._pc_img = QLabel("PC screenshot ekhono neoa hoy ni — Refresh chapo.")
+        self._pc_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._pc_img.setFont(hud_font(8))
+        self._pc_img.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: {C.PANEL2}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 8px;")
+        self._pc_img.setMinimumHeight(120)
+        lay.addWidget(self._pc_img)
+        row = QHBoxLayout()
+        b = QPushButton("🔄  Refresh PC screen")
+        b.setFont(hud_font(8))
+        b.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; border-radius: 8px; padding: 5px;")
+        b.clicked.connect(self._on_refresh_pc)
+        row.addWidget(b)
+        row.addStretch()
+        lay.addLayout(row)
+
+        # (5) Location
+        _section("📍  LOCATION — phone kothay")
+        self._loc_lbl = _txt(9)
+        lay.addWidget(self._loc_lbl)
+        row = QHBoxLayout()
+        b = QPushButton("📍  Find phone")
+        b.setFont(hud_font(8))
+        b.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; border-radius: 8px; padding: 5px;")
+        b.clicked.connect(self._on_find_phone)
+        row.addWidget(b)
+        row.addStretch()
+        lay.addLayout(row)
+
+        # (6) Quick actions — all through the action queue.
+        _section("⚡  QUICK ACTIONS — queue-te jabe, Mark chalabe")
+        grid = QGridLayout()
+        grid.setSpacing(4)
+        for i, (label, tool, args) in enumerate(self._QUICK_ACTIONS):
+            b = QPushButton(label)
+            b.setFont(hud_font(8))
+            b.setStyleSheet(
+                f"color: {C.PRI}; background: {C.PANEL2}; "
+                f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 6px")
+            b.clicked.connect(
+                lambda _c, t=tool, a=args, l=label: self._on_quick(l, t, a))
+            grid.addWidget(b, i // 3, i % 3)
+        lay.addLayout(grid)
+
+        # 💬 ASK MUSE — Mark ja korche seta Muse-ke task hisebe pathao
+        # (core/muse_bridge.create_task — fast config write, no network).
+        ask_btn = QPushButton("💬  ASK MUSE — ei kaj-ta Muse-ke dao")
+        ask_btn.setFont(hud_font(9, QFont.Weight.Bold))
+        ask_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ask_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {C.PRI}; background: {C.PANEL2};
+                border: 1px solid {C.PRI_DIM}; border-radius: 8px; padding: 8px;
+            }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border: 1px solid {C.PRI}; }}
+        """)
+        ask_btn.clicked.connect(self._on_ask_muse)
+        lay.addWidget(ask_btn)
+
+        self._status_lbl = _lbl("", 8, color=C.GREEN)
+        lay.addWidget(self._status_lbl)
+
+        lay.addStretch()
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+
+        close_btn = QPushButton("✕  BONDHO KORO")
+        close_btn.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent; padding: 4px;")
+        close_btn.clicked.connect(self._do_close)
+        outer.addWidget(close_btn)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(1000)
+        self._tick()
+
+    # ── worker results (Qt thread via _worker_done) ──────────────────────────
+
+    def _on_worker_done(self, kind: str, msg: str) -> None:
+        self._status_lbl.setText(str(msg or "")[:300])
+        if kind == "phone_screen":
+            self._load_phone_img(force=True)
+        elif kind == "pc_screen":
+            self._load_pc_img(force=True)
+        elif kind == "location":
+            self._tick()
+
+    # ── actions ──────────────────────────────────────────────────────────────
+
+    def _on_refresh_phone(self) -> None:
+        self._status_lbl.setText("⏳ Phone-ke screen-er jonno bolchi…")
+
+        def _work():
+            try:
+                from core import jarvis_link
+                link = jarvis_link.LINK
+                if link is None or not link.paired:
+                    res = "📱 Phone pair kora nei — age QR scan koro."
+                else:
+                    res = link.fetch_phone_screen()
+            except Exception as e:
+                res = f"Phone screen ante parlam na: {e}"
+            self._worker_done.emit("phone_screen", str(res)[:300])
+
+        threading.Thread(target=_work, daemon=True,
+                         name="main-agent-phone-screen").start()
+
+    def _on_refresh_pc(self) -> None:
+        self._status_lbl.setText("⏳ PC screen nichhi…")
+
+        def _work():
+            res = self._capture_pc_screen_sync()
+            self._worker_done.emit(
+                "pc_screen",
+                "🖥️ PC screen nilam." if res else
+                "PC screenshot not available — mss/ImageGrab konotai cholche na.")
+
+        threading.Thread(target=_work, daemon=True,
+                         name="main-agent-pc-screen").start()
+
+    @staticmethod
+    def _capture_pc_screen_sync() -> str:
+        """Capture the PC screen to memory/pc_screen.jpg. Reuses the
+        jarvis_link capture helper when the link is attached (the same
+        helper the phone's screen_req uses); otherwise mss directly.
+        Returns the path or ''. Never raises. (Worker thread only.)"""
+        try:
+            from core import jarvis_link
+            link = jarvis_link.LINK
+            if link is not None:
+                return link.capture_pc_screen()
+        except Exception:
+            pass
+        try:
+            import io
+            import mss
+            from pathlib import Path as _Path
+            from PIL import Image
+            with mss.mss() as sct:
+                shot = sct.grab(sct.monitors[1])
+            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+            img.thumbnail((1280, 1280))
+            p = _Path(__file__).resolve().parent.parent / "memory" / "pc_screen.jpg"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            img.save(str(p), format="JPEG", quality=80)
+            return str(p)
+        except Exception:
+            return ""
+
+    def _on_find_phone(self) -> None:
+        self._status_lbl.setText("⏳ Phone-er location khujchi…")
+
+        def _work():
+            try:
+                from core import jarvis_link
+                link = jarvis_link.LINK
+                if link is None or not link.paired:
+                    res = "location unavailable — phone pair kora nei."
+                else:
+                    res = link.request_phone_location(timeout=30.0)
+            except Exception as e:
+                res = f"Location ante parlam na: {e}"
+            self._worker_done.emit("location", str(res)[:300])
+
+        threading.Thread(target=_work, daemon=True,
+                         name="main-agent-find-phone").start()
+
+    def _on_quick(self, label: str, tool: str, args: dict) -> None:
+        try:
+            from core.action_queue import enqueue
+            qid = enqueue(tool, dict(args or {}))
+        except Exception:
+            qid = ""
+        if qid:
+            self._status_lbl.setText(
+                f"✅ {label}: queued — Mark will run it (#{qid}).")
+        else:
+            self._status_lbl.setText(
+                f"⚠️ {label}: queue-te dite parlam na — abar try koro.")
+
+    def _on_ask_muse(self) -> None:
+        """💬 ASK MUSE — queue Mark's current work to Muse Bridge.
+
+        create_task is a fast config write (no network), so this runs on
+        the Qt thread. Never raises — a missing bridge reports as a status
+        line, never a crash."""
+        try:
+            _tid, msg = ask_muse_about_current_work()
+        except Exception as e:
+            msg = f"⚠️ Muse-ke task pathate parlam na: {e}"
+        self._status_lbl.setText(str(msg or "")[:300])
+
+    # ── tick (Qt thread only) ────────────────────────────────────────────────
+
+    def _load_phone_img(self, force: bool = False) -> None:
+        try:
+            from pathlib import Path
+            p = Path(__file__).resolve().parent.parent / "memory" / "phone_screen.jpg"
+            if not p.is_file():
+                return
+            mtime = p.stat().st_mtime
+            if not force and mtime == self._phone_mtime:
+                return
+            self._phone_mtime = mtime
+            px = QPixmap(str(p))
+            if px.isNull():
+                return
+            self._phone_img.setPixmap(px.scaled(
+                460, 300, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+        except Exception:
+            pass
+
+    def _load_pc_img(self, force: bool = False) -> None:
+        try:
+            from pathlib import Path
+            p = Path(__file__).resolve().parent.parent / "memory" / "pc_screen.jpg"
+            if not p.is_file():
+                return
+            mtime = p.stat().st_mtime
+            if not force and mtime == self._pc_mtime:
+                return
+            self._pc_mtime = mtime
+            px = QPixmap(str(p))
+            if px.isNull():
+                return
+            self._pc_img.setPixmap(px.scaled(
+                460, 300, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+        except Exception:
+            pass
+
+    def _tick(self) -> None:
+        self._tick_count += 1
+        # (1) Mark live status
+        try:
+            from core.mark_status import snapshot as _mark_snapshot
+            ms = _mark_snapshot()
+            self._mark_lbl.setText(
+                "• Current: " + str(ms.get("current_task") or "Idle") + "\n"
+                "• Last reply: " + (str(ms.get("last_response") or "—")[:160])
+                + "\n• Queue: " + str(ms.get("queue_len", 0)) + " pending"
+                + (f"  •  updated {ms.get('updated_at')}"
+                   if ms.get("updated_at") else ""))
+        except Exception:
+            pass
+        # (2) Agents + automation, one line each
+        try:
+            snap = REGISTRY.snapshot()
+            working = [a for a in snap if a.get("status") == "working"]
+            done = sum(int(a.get("completed_count") or 0) for a in snap)
+            self._agents_lbl.setText(
+                "🤖 " + ", ".join(
+                    f"{a.get('icon', '')}{a.get('name', '?')}: "
+                    f"{a.get('status', 'idle')}"
+                    + (f" ({str(a.get('current_task') or '')[:40]})"
+                       if a.get("status") == "working" else "")
+                    for a in snap)
+                + f"  •  {len(working)} working • {done} done total")
+        except Exception:
+            pass
+        try:
+            from core.automation import ENGINE
+            tasks = ENGINE.list_tasks()
+            on = sum(1 for t in tasks if t.get("enabled"))
+            nxts = [t.get("next_run") for t in tasks
+                    if t.get("enabled") and t.get("next_run")]
+            self._auto_lbl.setText(
+                f"⚡ {len(tasks)} automation task ({on} on)"
+                + (f" • next run ⏭ {_countdown(min(nxts))}"
+                   if nxts else " • next run —"))
+        except Exception:
+            pass
+        # 👤 Guest mode — read fresh each tick; never raises.
+        try:
+            from core.cat09_security import guest_mode_enabled as _gm
+            self._guest_lbl.setText("👤 Guest mode ON" if _gm() else "")
+        except Exception:
+            pass
+        # (5) Location — last-known fix (never faked)
+        try:
+            from core.phone_location import last_fix
+            fix = last_fix()
+            if fix:
+                self._loc_lbl.setText(
+                    f"📍 Lat {fix.get('lat')}, Lng {fix.get('lon')} "
+                    f"({fix.get('at') or ''})  •  "
+                    f"🗺️ google.com/maps?q={fix.get('lat')},{fix.get('lon')}")
+            else:
+                self._loc_lbl.setText(
+                    "📍 Phone-er location jani na ekhono — 'Find phone' chapo; "
+                    "phone GPS + Location permission ON thakte hobe.")
+        except Exception:
+            pass
+        # (3)+(4) Screens re-poll every 4 s (tick is 1 s).
+        if self._tick_count % 4 == 0:
+            self._load_phone_img()
+            self._load_pc_img()
 
     def _do_close(self) -> None:
         self._timer.stop()
