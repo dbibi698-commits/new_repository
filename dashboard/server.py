@@ -738,6 +738,13 @@ _FB_PUBLIC_URL    = "https://mark-lvii-dashboard.onrender.com"
 _FB_CALLBACK_URL  = _FB_PUBLIC_URL + "/api/facebook/callback"
 _FB_LOGIN_PAGE_URL = _FB_PUBLIC_URL + "/facebook/login"
 _FB_SCOPES        = "pages_manage_posts,pages_read_engagement,pages_show_list"
+# Instagram uses the SAME Facebook App (same App ID / Secret) — only the
+# callback URL and the permission scope differ. The IG callback URL must
+# ALSO be pasted into the app's "Valid OAuth Redirect URIs" field.
+_IG_CALLBACK_URL   = _FB_PUBLIC_URL + "/api/instagram/callback"
+_IG_LOGIN_PAGE_URL = _FB_PUBLIC_URL + "/instagram/login"
+_IG_SCOPES         = ("instagram_basic,instagram_content_publish,"
+                     "pages_show_list,pages_read_engagement")
 
 # Tiny copy-to-clipboard helper (navigator.clipboard with an execCommand
 # fallback for older browsers). Shared by the login page; the pages page
@@ -751,18 +758,20 @@ setTimeout(function(){ b.textContent=t; },1500); }
 </script>"""
 
 
-def _fb_url_copy_boxes() -> str:
+def _fb_url_copy_boxes(callback_url: str = _FB_CALLBACK_URL,
+                       login_url: str = _FB_LOGIN_PAGE_URL) -> str:
     """Callback URL + login page URL, each in a visible box with a Copy button.
 
     Shown on the login page in both branches — the user needs the callback
-    URL to paste into Facebook BEFORE the App ID env var is set.
+    URL to paste into Facebook BEFORE the App ID env var is set. Defaults
+    are the Facebook flow; the Instagram flow passes its own URLs.
     """
     return f"""<div class="card" style="text-align:left">
 <p>Callback URL — Facebook-er "Valid OAuth Redirect URIs"-e ei-ta bosao:</p>
-<input class="tok" id="cburl" readonly value="{_FB_CALLBACK_URL}">
+<input class="tok" id="cburl" readonly value="{callback_url}">
 <button onclick="copyField('cburl')">📋 Copy callback URL</button>
 <p>Login page URL:</p>
-<input class="tok" id="loginurl" readonly value="{_FB_LOGIN_PAGE_URL}">
+<input class="tok" id="loginurl" readonly value="{login_url}">
 <button onclick="copyField('loginurl')">📋 Copy login URL</button>
 </div>"""
 
@@ -773,13 +782,18 @@ def _fb_env() -> tuple[str, str]:
             (os.environ.get("FACEBOOK_APP_SECRET") or "").strip())
 
 
-def _fb_login_url(app_id: str) -> str:
-    """The facebook.com dialog/oauth URL the Login button points at."""
+def _fb_login_url(app_id: str, redirect_uri: str = _FB_CALLBACK_URL,
+                  scope: str = _FB_SCOPES) -> str:
+    """The facebook.com dialog/oauth URL a Login button points at.
+
+    Defaults are the Facebook flow; the Instagram flow passes its own
+    redirect_uri + scope.
+    """
     from urllib.parse import urlencode
     qs = urlencode({
         "client_id": app_id,
-        "redirect_uri": _FB_CALLBACK_URL,
-        "scope": _FB_SCOPES,
+        "redirect_uri": redirect_uri,
+        "scope": scope,
         "response_type": "code",
     })
     return f"https://www.facebook.com/{_FB_GRAPH_VERSION}/dialog/oauth?{qs}"
@@ -804,17 +818,19 @@ def _fb_http_get(url: str, params: dict) -> tuple[int, dict]:
 
 
 def _fb_exchange_code(code: str, app_id: str,
-                      app_secret: str) -> tuple[str | None, str | None]:
+                      app_secret: str,
+                      redirect_uri: str = _FB_CALLBACK_URL) -> tuple[str | None, str | None]:
     """Exchange an OAuth code for a short-lived user token.
 
     Returns (token, None) on success or (None, plain-words Bengali error).
     The app secret is only ever sent to graph.facebook.com, never logged
-    and never returned.
+    and never returned. redirect_uri must be the exact callback URL the
+    login flow used (Facebook flow default, Instagram flow passes its own).
     """
     status, data = _fb_http_get(
         f"https://graph.facebook.com/{_FB_GRAPH_VERSION}/oauth/access_token",
         {"client_id": app_id, "client_secret": app_secret,
-         "redirect_uri": _FB_CALLBACK_URL, "code": code})
+         "redirect_uri": redirect_uri, "code": code})
     tok = (data.get("access_token") or "").strip()
     if status == 200 and tok:
         return tok, None
@@ -831,6 +847,18 @@ def _fb_exchange_code(code: str, app_id: str,
                    + (f" {msg}" if msg else ""))
 
 
+def _fb_accounts_error(status: int, data: dict) -> str:
+    """Plain-words Bengali error for a failed /me/accounts call."""
+    err = data.get("error") or {}
+    msg = str(err.get("message") or "")
+    if status in (400, 401, 403):
+        return ("Facebook Page list ante parlam na — token-ta expire hoye "
+                "geche hote pare. Abar Login chapho."
+                + (f" ({msg})" if msg else ""))
+    return (f"Facebook Page list ante parlam na (HTTP {status})."
+            + (f" {msg}" if msg else ""))
+
+
 def _fb_list_pages(user_token: str) -> tuple[list, str | None]:
     """GET /me/accounts → [{"id", "name", "token"}]. Plain-words error or None."""
     status, data = _fb_http_get(
@@ -845,14 +873,35 @@ def _fb_list_pages(user_token: str) -> tuple[list, str | None]:
             if pid and ptok:
                 pages.append({"id": pid, "name": name or pid, "token": ptok})
         return pages, None
-    err = data.get("error") or {}
-    msg = str(err.get("message") or "")
-    if status in (400, 401, 403):
-        return [], ("Facebook Page list ante parlam na — token-ta expire hoye "
-                    "geche hote pare. Abar Login chapho."
-                    + (f" ({msg})" if msg else ""))
-    return [], (f"Facebook Page list ante parlam na (HTTP {status})."
-                + (f" {msg}" if msg else ""))
+    return [], _fb_accounts_error(status, data)
+
+
+def _ig_list_pages(user_token: str) -> tuple[list, str | None]:
+    """GET /me/accounts with the linked Instagram business account.
+
+    Returns [{"id", "name", "token", "ig_id", "ig_username"}]. A Page with
+    no linked IG business account still appears, with empty ig_id /
+    ig_username — the page says so plainly instead of hiding the Page.
+    """
+    status, data = _fb_http_get(
+        f"https://graph.facebook.com/{_FB_GRAPH_VERSION}/me/accounts",
+        {"fields": "instagram_business_account{id,username},name,access_token",
+         "access_token": user_token})
+    if status == 200:
+        pages = []
+        for p in data.get("data") or []:
+            pid = str(p.get("id") or "").strip()
+            name = str(p.get("name") or "").strip()
+            ptok = str(p.get("access_token") or "").strip()
+            if not pid or not ptok:
+                continue
+            ig = p.get("instagram_business_account") or {}
+            ig_id = str(ig.get("id") or "").strip()
+            ig_name = str(ig.get("username") or "").strip()
+            pages.append({"id": pid, "name": name or pid, "token": ptok,
+                          "ig_id": ig_id, "ig_username": ig_name})
+        return pages, None
+    return [], _fb_accounts_error(status, data)
 
 
 def _fb_page(title: str, body: str) -> str:
@@ -936,6 +985,68 @@ def _fb_error_html(title: str, message: str) -> str:
 <p>{html.escape(message)}</p>
 <p><a class="btn" href="/facebook/login">🔄 Abar Login koro</a></p></div>"""
     return _fb_page(title, body)
+
+
+def _ig_login_html(app_id: str) -> str:
+    """The /instagram/login page: Login button, or the env-var setup note.
+
+    Same Facebook App (same App ID / Secret) as the Facebook flow — only
+    the callback URL and the scope differ. Both branches show the callback
+    + login URL copy boxes.
+    """
+    boxes = (_fb_url_copy_boxes(_IG_CALLBACK_URL, _IG_LOGIN_PAGE_URL)
+             + _FB_COPY_JS)
+    if not app_id:
+        body = """<div class="box"><h1>📸 Instagram Login — Mark-LVII</h1>
+<p>Instagram post korar jonno age App ID set korte hobe — Facebook-er motoi, ekoi App.</p>
+<p>👉 <b>Render dashboard</b> → Service <b>mark-lvii-dashboard</b> → <b>Environment</b> → add koro:</p>
+<p><code>FACEBOOK_APP_ID</code> = tomar Facebook App-er App ID<br>
+<code>FACEBOOK_APP_SECRET</code> = tomar Facebook App-er App Secret</p>
+<p class="dim">App ID / Secret pabe: developers.facebook.com → tomar app → Settings → Basic.<br>
+Kokhono chat-e token/secret pathio na — sudhu Render env vars-e bosao.</p></div>""" + boxes
+        return _fb_page("Instagram Login — Mark-LVII", body)
+    url = _fb_login_url(app_id, _IG_CALLBACK_URL, _IG_SCOPES)
+    body = f"""<div class="box" style="text-align:center"><h1>📸 Instagram Login — Mark-LVII</h1>
+<p>Facebook-e Login chaple Facebook tomar Page-er sathe linked Instagram account-er tothyo debe.<br>
+IG user id + Page token ekhanei dekhabe — tarpor Mark-er Connections tab-e bosabe.</p>
+<p><a class="btn" href="{html.escape(url, quote=True)}">🔵 Login with Facebook</a></p>
+<p class="dim">Instagram-er callback URL-tao Facebook-er "Valid OAuth Redirect URIs"-e thakte hobe — Copy chaple copy hobe.</p></div>""" + boxes
+    return _fb_page("Instagram Login — Mark-LVII", body)
+
+
+def _ig_pages_html(pages: list) -> str:
+    """The Instagram callback success page: Page + linked IG account + token.
+
+    Each value has its own copy button. A Page with no linked IG business
+    account says so plainly instead of being hidden.
+    """
+    cards = []
+    for i, p in enumerate(pages):
+        name = html.escape(p["name"])
+        pid = html.escape(p["id"])
+        tok = html.escape(p["token"], quote=True)
+        ig_id = html.escape(p["ig_id"])
+        ig_name = html.escape(p["ig_username"])
+        if p["ig_id"]:
+            ig_block = f"""<p>📸 Instagram: <b>@{ig_name}</b></p>
+<p>IG user id: <code>{ig_id}</code> <button class="ghost" onclick="copyField('igid{i}')">📋 Copy IG id</button></p>
+<input type="hidden" id="igid{i}" value="{ig_id}">"""
+        else:
+            ig_block = """<p>⚠️ ei Page-er sathe kono IG business account linked nei — Facebook Page
+Settings → Linked accounts-e Instagram connect koro, tarpor abar Login chapho.</p>"""
+        cards.append(f"""<div class="card"><h2>📄 {name}</h2>
+{ig_block}
+<p>Page ID: <code>{pid}</code> <button class="ghost" onclick="copyField('pid{i}')">📋 Copy ID</button></p>
+<p>Page token (Mark-e <code>instagram_token</code> hisebe bosabe):</p>
+<input class="tok" id="tok{i}" readonly value="{tok}">
+<button onclick="copyField('tok{i}')">📋 Copy token</button>
+<input type="hidden" id="pid{i}" value="{pid}"></div>""")
+    body = """<div class="box"><h1>✅ Instagram Login holo</h1>
+<p>Mark-er Connections tab-e bosao: <code>instagram_user_id</code> = IG user id,
+<code>instagram_token</code> = Page token. (Facebook Page ID lagbe na — sudhu ei duto.)</p>
+<p class="dim">Token-ta ekhane kothao save kora hoy ni — ei page-ta bondho korle abar Login korte hobe.</p></div>
+""" + "\n".join(cards) + _FB_COPY_JS
+    return _fb_page("Instagram — Mark-LVII", body)
 
 
 class DashboardServer:
@@ -3287,6 +3398,51 @@ loadPc(); setInterval(loadPc, 4000);
                     "permission dao ni. Facebook-e Page banao / permission dao, "
                     "tarpor abar Login chapho."))
             return HTMLResponse(_fb_pages_html(pages))
+
+        # ── Instagram OAuth (IG business account) ─────────────────────────
+        # Same Facebook App (same App ID / Secret) as the Facebook flow —
+        # only the callback URL and the scope differ. instagram_post needs
+        # the IG user id + the Page token, so the callback page shows both.
+        @app.get("/instagram/login", response_class=HTMLResponse)
+        async def instagram_login_page():
+            app_id, _secret = _fb_env()
+            return HTMLResponse(_ig_login_html(app_id))
+
+        @app.get("/api/instagram/callback", response_class=HTMLResponse)
+        async def instagram_callback(code: str = "", error: str = "",
+                                     error_description: str = ""):
+            if error:
+                reason = (error_description or "").strip()
+                msg = "Facebook Login cancel kora hoyeche."
+                if reason:
+                    msg += " (" + reason + ")"
+                msg += " IG account pete abar Login chapho."
+                return HTMLResponse(_fb_error_html("Login cancel", msg))
+            if not code:
+                return HTMLResponse(_fb_error_html(
+                    "Login holo na",
+                    "Facebook theke kono code pelam na. Abar /instagram/login "
+                    "theke Login chapho."))
+            app_id, app_secret = _fb_env()
+            if not app_id or not app_secret:
+                return HTMLResponse(_fb_error_html(
+                    "App ID / Secret set kora nei",
+                    "Render dashboard → Environment-e FACEBOOK_APP_ID ar "
+                    "FACEBOOK_APP_SECRET bosao, tarpor abar Login chapho."))
+            user_token, err = await asyncio.to_thread(
+                _fb_exchange_code, code, app_id, app_secret, _IG_CALLBACK_URL)
+            if err:
+                return HTMLResponse(_fb_error_html("Token exchange holo na", err))
+            pages, err2 = await asyncio.to_thread(_ig_list_pages, user_token)
+            if err2:
+                return HTMLResponse(_fb_error_html("Page list pelam na", err2))
+            if not pages:
+                return HTMLResponse(_fb_error_html(
+                    "Kono Page pelam na",
+                    "Ei Facebook account-e kono Page pelam na, ba Page-er "
+                    "permission dao ni. Facebook-e Page banao / permission dao, "
+                    "tarpor abar Login chapho."))
+            return HTMLResponse(_ig_pages_html(pages))
 
         return app
 

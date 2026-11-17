@@ -1,4 +1,5 @@
-"""tests/test_facebook_oauth.py — Facebook OAuth callback (dashboard/server.py).
+"""tests/test_facebook_oauth.py — Facebook + Instagram OAuth callbacks
+(dashboard/server.py).
 
 Run from ~/workspace/mark-lvii:
     python3 tests/test_facebook_oauth.py
@@ -286,6 +287,201 @@ class TestRoutes(_Base):
             return 200, {"data": []}
         server._fb_http_get = _get
         ep = self._endpoint("/api/facebook/callback")
+        resp = asyncio.run(ep(code="CODE123"))
+        self.assertIn("Kono Page pelam na", resp.body.decode())
+
+
+class TestInstagramLoginUrl(_Base):
+    def test_ig_login_url_shape(self):
+        url = server._fb_login_url(_FAKE_APP_ID, server._IG_CALLBACK_URL,
+                                   server._IG_SCOPES)
+        self.assertIn("facebook.com/v18.0/dialog/oauth", url)
+        self.assertIn("client_id=" + _FAKE_APP_ID, url)
+        self.assertIn("redirect_uri=https%3A%2F%2Fmark-lvii-dashboard"
+                      ".onrender.com%2Fapi%2Finstagram%2Fcallback", url)
+        self.assertIn("instagram_basic", url)
+        self.assertIn("instagram_content_publish", url)
+        self.assertIn("pages_show_list", url)
+        self.assertNotIn("pages_manage_posts", url)
+
+    def test_ig_callback_url_constant(self):
+        self.assertEqual(
+            server._IG_CALLBACK_URL,
+            "https://mark-lvii-dashboard.onrender.com/api/instagram/callback")
+        self.assertEqual(
+            server._IG_LOGIN_PAGE_URL,
+            "https://mark-lvii-dashboard.onrender.com/instagram/login")
+
+    def test_fb_and_ig_urls_differ(self):
+        self.assertNotEqual(server._FB_CALLBACK_URL, server._IG_CALLBACK_URL)
+
+
+class TestInstagramLoginPage(_Base):
+    def test_with_app_id(self):
+        html = server._ig_login_html(_FAKE_APP_ID)
+        self.assertIn("Instagram Login", html)
+        self.assertIn("Login with Facebook", html)
+        self.assertIn("dialog/oauth", html)
+        self.assertIn(server._IG_CALLBACK_URL, html)
+        self.assertIn(server._IG_LOGIN_PAGE_URL, html)
+        self.assertIn('id="cburl"', html)
+        self.assertIn('id="loginurl"', html)
+        self.assertIn("Copy callback URL", html)
+        self.assertNotIn(_FAKE_SECRET, html)
+
+    def test_without_app_id(self):
+        os.environ.pop("FACEBOOK_APP_ID", None)
+        html = server._ig_login_html("")
+        self.assertIn("FACEBOOK_APP_ID", html)
+        self.assertIn('id="cburl"', html)
+        self.assertIn(server._IG_CALLBACK_URL, html)
+
+
+class TestInstagramListPages(_Base):
+    def test_mixed_linked_and_unlinked(self):
+        server._fb_http_get = _fake_http(200, {"data": [
+            {"id": _FAKE_PAGE_ID, "name": "Shop Page",
+             "access_token": _FAKE_PAGE_TOKEN,
+             "instagram_business_account": {"id": "17841400008460056",
+                                            "username": "myshop"}},
+            {"id": "111222333444555", "name": "Lonely Page",
+             "access_token": "FAKEPAGETOKEN-2",
+             "instagram_business_account": None}]})
+        pages, err = server._ig_list_pages(_FAKE_USER_TOKEN)
+        self.assertIsNone(err)
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(pages[0]["ig_id"], "17841400008460056")
+        self.assertEqual(pages[0]["ig_username"], "myshop")
+        self.assertEqual(pages[0]["token"], _FAKE_PAGE_TOKEN)
+        self.assertEqual(pages[1]["ig_id"], "")
+        self.assertEqual(pages[1]["ig_username"], "")
+
+    def test_empty(self):
+        server._fb_http_get = _fake_http(200, {"data": []})
+        pages, err = server._ig_list_pages(_FAKE_USER_TOKEN)
+        self.assertEqual(pages, [])
+        self.assertIsNone(err)
+
+    def test_unauthorized_plain_words(self):
+        server._fb_http_get = _fake_http(401, {"error": {
+            "message": "Session has expired", "code": 190}})
+        pages, err = server._ig_list_pages("STALE")
+        self.assertEqual(pages, [])
+        self.assertIn("Abar Login", err)
+
+    def test_requests_ig_fields(self):
+        fake = _fake_http(200, {"data": []})
+        server._fb_http_get = fake
+        server._ig_list_pages(_FAKE_USER_TOKEN)
+        url, params = fake.captured[0]
+        self.assertIn("/me/accounts", url)
+        self.assertIn("instagram_business_account", params["fields"])
+
+
+class TestInstagramPagesHtml(_Base):
+    def test_linked_page_shows_ig_and_token(self):
+        html = server._ig_pages_html([{
+            "id": _FAKE_PAGE_ID, "name": "Shop Page",
+            "token": _FAKE_PAGE_TOKEN,
+            "ig_id": "17841400008460056", "ig_username": "myshop"}])
+        self.assertIn("@myshop", html)
+        self.assertIn("17841400008460056", html)
+        self.assertIn("Copy IG id", html)
+        self.assertIn("Copy token", html)
+        self.assertIn("instagram_user_id", html)
+        self.assertIn("instagram_token", html)
+
+    def test_unlinked_page_says_so_plainly(self):
+        html = server._ig_pages_html([{
+            "id": "111222333444555", "name": "Lonely Page",
+            "token": "FAKEPAGETOKEN-2", "ig_id": "", "ig_username": ""}])
+        self.assertIn("linked nei", html)
+        self.assertIn("Lonely Page", html)
+        self.assertIn("Copy token", html)
+
+    def test_escapes_names(self):
+        html = server._ig_pages_html([{
+            "id": _FAKE_PAGE_ID, "name": "<b>evil</b>",
+            "token": _FAKE_PAGE_TOKEN,
+            "ig_id": "1", "ig_username": "<img src=x>"}])
+        self.assertNotIn("<b>evil</b>", html)
+        self.assertNotIn("<img src=x>", html)
+        self.assertIn("&lt;b&gt;", html)
+
+
+class TestInstagramRoutes(_Base):
+    def test_login_route(self):
+        ep = self._endpoint("/instagram/login")
+        resp = asyncio.run(ep())
+        body = resp.body.decode()
+        self.assertIn("Instagram Login", body)
+        self.assertIn("Login with Facebook", body)
+        self.assertIn(server._IG_CALLBACK_URL, body)
+
+    def test_callback_denied(self):
+        ep = self._endpoint("/api/instagram/callback")
+        resp = asyncio.run(ep(error="access_denied",
+                               error_description="The user denied your request"))
+        body = resp.body.decode()
+        self.assertIn("cancel", body)
+        self.assertNotIn(_FAKE_SECRET, body)
+
+    def test_callback_no_code(self):
+        ep = self._endpoint("/api/instagram/callback")
+        resp = asyncio.run(ep())
+        self.assertIn("kono code pelam na", resp.body.decode())
+
+    def test_callback_full_flow_uses_ig_redirect(self):
+        captured = []
+
+        def _get(url, params):
+            captured.append((url, dict(params)))
+            if "/oauth/access_token" in url:
+                return 200, {"access_token": _FAKE_USER_TOKEN}
+            if "/me/accounts" in url:
+                return 200, {"data": [
+                    {"id": _FAKE_PAGE_ID, "name": "Shop Page",
+                     "access_token": _FAKE_PAGE_TOKEN,
+                     "instagram_business_account": {
+                         "id": "17841400008460056",
+                         "username": "myshop"}}]}
+            return 404, {}
+        server._fb_http_get = _get
+        ep = self._endpoint("/api/instagram/callback")
+        resp = asyncio.run(ep(code="CODE123"))
+        body = resp.body.decode()
+        self.assertIn("@myshop", body)
+        self.assertIn("17841400008460056", body)
+        self.assertIn(_FAKE_PAGE_TOKEN, body)
+        self.assertIn("instagram_user_id", body)
+        self.assertIn("instagram_token", body)
+        self.assertNotIn(_FAKE_SECRET, body)
+        # the code exchange used the INSTAGRAM callback URL, not Facebook's
+        exch = [p for u, p in captured if "/oauth/access_token" in u][0]
+        self.assertEqual(exch["redirect_uri"], server._IG_CALLBACK_URL)
+
+    def test_callback_unlinked_page_still_renders(self):
+        def _get(url, params):
+            if "/oauth/access_token" in url:
+                return 200, {"access_token": _FAKE_USER_TOKEN}
+            return 200, {"data": [
+                {"id": "111222333444555", "name": "Lonely Page",
+                 "access_token": "FAKEPAGETOKEN-2",
+                 "instagram_business_account": None}]}
+        server._fb_http_get = _get
+        ep = self._endpoint("/api/instagram/callback")
+        resp = asyncio.run(ep(code="CODE123"))
+        body = resp.body.decode()
+        self.assertIn("linked nei", body)
+        self.assertIn("Lonely Page", body)
+
+    def test_callback_no_pages(self):
+        def _get(url, params):
+            if "/oauth/access_token" in url:
+                return 200, {"access_token": _FAKE_USER_TOKEN}
+            return 200, {"data": []}
+        server._fb_http_get = _get
+        ep = self._endpoint("/api/instagram/callback")
         resp = asyncio.run(ep(code="CODE123"))
         self.assertIn("Kono Page pelam na", resp.body.decode())
 
