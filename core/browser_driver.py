@@ -443,6 +443,45 @@ class Driver:
         except Exception as e:
             return False, f"Screenshot nite parlam na: {e}"
 
+    def type_text(self, selector: str, text: str) -> tuple[bool, str]:
+        """Click an element then type into it (for contenteditable fields
+        like Facebook's composer or YouTube Studio's title box, where
+        fill() cannot work). DOM backends only."""
+        try:
+            selector = (selector or "").strip()
+            if not selector:
+                return False, "type_text-e selector dao."
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            self._page.click(selector, timeout=_STEP_TIMEOUT_MS)
+            time.sleep(0.3)
+            self._page.keyboard.type(str(text or ""), delay=5)
+            return True, f"Type korlam: {selector}"
+        except Exception as e:
+            return False, f"Type korte parlam na ({selector}): {e}"
+
+    def set_input_files(self, selector: str, path: str) -> tuple[bool, str]:
+        """Set a <input type=file> value without opening the OS file
+        picker (Playwright set_input_files — the upload flows use this
+        for Instagram/Facebook/YouTube). DOM backends only; the
+        pyautogui backend has no DOM and refuses honestly."""
+        try:
+            selector = (selector or "").strip()
+            path = (path or "").strip()
+            if not selector:
+                return False, "set_input_files-e selector dao."
+            if not path:
+                return False, "set_input_files-e file path dao."
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            self._page.set_input_files(selector, path,
+                                       timeout=_STEP_TIMEOUT_MS)
+            return True, f"File select korlam: {path}"
+        except Exception as e:
+            return False, f"File select korte parlam na ({selector}): {e}"
+
     def fill_form(self, fields: dict, submit_selector: str | None = None) -> tuple[bool, str]:
         """Fill several fields in order, then optionally click a submit
         button. `fields` is {selector: text}. DOM backends only — the
@@ -608,6 +647,71 @@ class Driver:
             return True, f"Mouse click ({x}, {y})"
         except Exception as e:
             return False, f"Mouse click holo na: {e}"
+
+    def eval_js(self, js: str) -> tuple[bool, str]:
+        """Evaluate JS on the page and return the result as a string.
+        DOM backends only."""
+        try:
+            js = (js or "").strip()
+            if not js:
+                return False, "eval_js-e JS dao."
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            result = self._page.evaluate(js)
+            return True, "" if result is None else str(result)
+        except Exception as e:
+            return False, f"JS evaluate korte parlam na: {e}"
+
+    def press_key(self, key: str) -> tuple[bool, str]:
+        """Press one keyboard key ('k' = play/pause on YouTube, 'Enter',
+        'Escape', 'Tab'). DOM backends use Playwright's keyboard;
+        pyautogui uses its own press."""
+        try:
+            key = (key or "").strip()
+            if not key:
+                return False, "press_key-e key dao."
+            if self.backend == BACKEND_PYAUTOGUI:
+                if self._pag is None:
+                    return False, "pyautogui backend launch kora nei."
+                self._pag.press(key)
+                return True, f"Key press korlam: {key}"
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            self._page.keyboard.press(key)
+            return True, f"Key press korlam: {key}"
+        except Exception as e:
+            return False, f"Key press korte parlam na ({key}): {e}"
+
+    def play_video(self, selector: str | None = None) -> tuple[bool, str]:
+        """Play the video on the page: click it (or press 'k'), then
+        verify it is actually playing (video.paused == false)."""
+        try:
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            sel = (selector or "").strip() or "video"
+            try:
+                self._page.click(sel, timeout=_STEP_TIMEOUT_MS)
+            except Exception:
+                try:
+                    self._page.keyboard.press("k")
+                except Exception as e:
+                    return False, f"Video play korte parlam na: {e}"
+            time.sleep(1.0)
+            ok, state = self.eval_js(
+                "(() => { const v = document.querySelector('video'); "
+                "return v ? (v.paused ? 'paused' : 'playing') : 'no-video'; })()")
+            if not ok:
+                return False, f"Video state check korte parlam na: {state}"
+            if state.strip() == "playing":
+                return True, "Video cholche ▶"
+            if state.strip() == "no-video":
+                return False, "Page-e kono video pelam na."
+            return False, "Video-ta play holo na (paused ache)."
+        except Exception as e:
+            return False, f"Video play korte parlam na: {e}"
 
     def wait(self, seconds: float) -> tuple[bool, str]:
         """Pause. Always succeeds (even with no browser)."""

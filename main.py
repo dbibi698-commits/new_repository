@@ -173,11 +173,13 @@ _TAIL_MARGIN = 0.25
 # The threshold is turn-scoped rather than idle-scoped, and measured rather than
 # guessed. An idle session receives NOTHING: watched for 150 s after a reply,
 # not one frame arrived unprompted, so "silence" cannot mean "dead". But an
-# ANSWERED turn is fast — first audio at 1.2 s, turn_complete at 3.6 s. Thirty
-# seconds is twenty-five times the measured first response, which leaves room
-# for a slow tool call (those send their own traffic, which clears the deadline)
-# while turning an unbounded hang into a blip.
-_STALL_LIMIT = 30.0
+# ANSWERED turn is fast — first audio at 1.2 s, turn_complete at 3.6 s. Fifteen
+# seconds is twelve times the measured first response, which leaves room for a
+# slow tool call (those send their own traffic, which clears the deadline)
+# while turning an unbounded hang into a blip. When it fires, the user HEARS
+# a local fallback line at once ("Shunchi — ektu deri hocche...") instead of
+# staring at silence, and the session rebuilds.
+_STALL_LIMIT = 15.0
 
 _VIS_WIN = 1024        # ~43 ms analysis window at 24 kHz: enough for formants
 _VIS_HOP = 480         # 20 ms between frames, i.e. 50 shapes a second
@@ -1637,6 +1639,7 @@ class JarvisLive:
         The reconnect keeps the resumption handle, so the conversation survives:
         this costs a couple of seconds and a line in the log, where before it
         cost the rest of the session with no indication anything was wrong.
+        The user also HEARS a local fallback line at once (never silence).
         """
         while True:
             await asyncio.sleep(2)
@@ -1646,9 +1649,47 @@ class JarvisLive:
             self._clear_stall()
             print(f"[JARVIS] ⚠️  No response for {_STALL_LIMIT:.0f}s — "
                   f"the live session is not answering. Rebuilding it.")
+            try:
+                from core import fast_reply as _fr
+                line = _fr.stall_line()
+                self.ui.write_log(f"SYS: {line}")
+                self.ui.set_live_reply(line)
+                self._speak_local(line)
+            except Exception:
+                pass
             self.ui.write_log("SYS: The model stopped answering — reconnecting.")
             self.request_reconnect(keep_context=True, reason="no response")
             return          # this session is going away; the new one gets its own watcher
+
+    def _speak_local(self, text: str) -> None:
+        """Speak one short line through the LOCAL TTS fallback (EdgeTTS /
+        system TTS), on a daemon thread. A FRESH player is created per
+        call — a stale TTS queue can never block a new utterance (that is
+        the queue recovery). Never raises, never blocks the caller."""
+        try:
+            t = str(text or "").strip()
+            if not t:
+                return
+            def _work():
+                try:
+                    from core import tts as _tts
+                    cfg = {}
+                    try:
+                        from memory.config_manager import get_plugin_config
+                        cfg = dict(get_plugin_config("voice_settings") or {})
+                    except Exception:
+                        cfg = {}
+                    player = _tts.create_tts_player(
+                        {"tts_engine": cfg.get("tts_engine", "edgetts"),
+                         "tts_voice": cfg.get("voice", ""),
+                         "tts_speed": cfg.get("rate", 1.0)})
+                    player.speak(t[:300])
+                except Exception as e:
+                    print(f"[JARVIS] local TTS fallback failed: {e}")
+            threading.Thread(target=_work, daemon=True,
+                             name="local-tts-fallback").start()
+        except Exception:
+            pass
 
     def request_reconnect(self, keep_context: bool = True, reason: str = ""):
         """Thread-safe: ask the run loop to tear down and rebuild the Live
@@ -1964,6 +2005,29 @@ class JarvisLive:
         if self._wake_enabled and not self._awake:
             self.ui.write_log("SYS: I'm asleep — say 'Hey Jarvis' or tap WAKE NOW first.")
             return
+        # ── fast reply: instant local answers, no Gemini round-trip ───
+        # Time/date, calculator, status, greetings, mode switches and the
+        # Bengali-only toggle answer AT ONCE from the PC — the user never
+        # waits on the network for those. Anything else gets an instant
+        # ack line in the HUD while the full reply generates.
+        try:
+            from core import fast_reply as _fr
+            local = _fr.answer_locally(text)
+            if local:
+                self.ui.write_log(f"You: {text}")
+                self.ui.set_live_reply(local)
+                self.ui.write_log(f"{self._asst_name}: {local}")
+                try:
+                    from core import mark_status as _ms
+                    _ms.set_last_response(local[:200])
+                    _ms.clear_task()
+                except Exception:
+                    pass
+                self._speak_local(local)
+                return
+            self.ui.set_live_reply(_fr.ack_line())
+        except Exception:
+            pass
         # ── 7-agent + automation: status + keyword triggers ─────────────
         try:
             from core import mark_status as _ms
@@ -2465,7 +2529,9 @@ class JarvisLive:
         if _guest and name in ("save_memory", "automation", "agents_automation",
                                "files_drive_cloud", "social_media", "build_tools",
                                "youtube_upload", "facebook_upload_video",
-                               "instagram_upload_video"):
+                               "instagram_upload_video", "video_upload_browser",
+                               "social_auto", "mouse_video_edit",
+                               "app_editor", "advanced_browser"):
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -3205,6 +3271,13 @@ class JarvisLive:
                                 # alone cannot show. Pure string work — it adds
                                 # nothing measurable to the response path.
                                 self._visemes.feed_text(txt)
+                                # STREAMING: show the reply in the HUD as it
+                                # arrives — the user reads it live instead of
+                                # waiting for turn_complete.
+                                try:
+                                    self.ui.set_live_reply(" ".join(out_buf))
+                                except Exception:
+                                    pass
 
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)

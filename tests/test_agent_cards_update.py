@@ -1,4 +1,4 @@
-"""tests/test_agent_cards_update.py — the 32 agent cards update:
+"""tests/test_agent_cards_update.py — the 87 agent cards update:
 core/agent_cards.py, core/render_deploy.py, core/browser_control.py,
 core/firebase_connect.py, core/hosting_autofix.py, core/live_screen.py,
 core/language.py + the new plugins (jarvis_language, jarvis_agent_cards,
@@ -8,6 +8,10 @@ gradle_build, software_builder, commander, photo_editor) + the Bengali-only prom
 Advanced round adds 4 more cards (data_analyzer, report_writer,
 email_sender, file_organizer) and the voice_settings + browser_advanced
 plugins — 28 -> 32 cards.
+
+Agents round adds 50 utility cards (Timer … Password Vault, incl. the
+YouTube agent) + the utility_* / youtube_play / file_edit / auto_task /
+watchdog24 plugins — 32 -> 87 cards.
 
 Run from ~/workspace/mark-lvii:
     python3 -m unittest discover -s tests -v
@@ -59,10 +63,10 @@ def _real_tools() -> set[str]:
 # ── agent cards registry ─────────────────────────────────────────────────────
 
 class TestAgentCardsRegistry(unittest.TestCase):
-    def test_exactly_32_cards(self):
+    def test_exactly_87_cards(self):
         from core import agent_cards as ac
-        self.assertEqual(ac.count(), 32, ac.count())
-        self.assertEqual(len(ac.CARD_DEFS), 32)
+        self.assertEqual(ac.count(), 87, ac.count())
+        self.assertEqual(len(ac.CARD_DEFS), 87)
 
     def test_first_card_is_main_agent(self):
         from core import agent_cards as ac
@@ -93,7 +97,7 @@ class TestAgentCardsRegistry(unittest.TestCase):
     def test_cards_live_readiness_never_raises(self):
         from core import agent_cards as ac
         cards = ac.cards()
-        self.assertEqual(len(cards), 32)
+        self.assertEqual(len(cards), 87)
         for c in cards:
             self.assertIn("ready", c)
             self.assertIn("missing", c)
@@ -125,6 +129,29 @@ class TestAgentCardsRegistry(unittest.TestCase):
         self.assertEqual(browser_advanced.PLUGIN["name"], "browser_advanced")
         self.assertEqual(voice_settings.PLUGIN_SETTINGS.get("widget"),
                          "voice_settings")
+        from plugins import (utility_time, utility_convert, utility_files,
+                             utility_system, utility_create, utility_life,
+                             utility_media, utility_phone, utility_vault,
+                             youtube_agent, file_edit, auto_tasks, watchdog24)
+        self.assertEqual(utility_time.PLUGIN["name"], "utility_time")
+        self.assertEqual(utility_convert.PLUGIN["name"], "utility_convert")
+        self.assertEqual(utility_files.PLUGIN["name"], "utility_files")
+        self.assertEqual(utility_system.PLUGIN["name"], "utility_system")
+        self.assertEqual(utility_create.PLUGIN["name"], "utility_create")
+        self.assertEqual(utility_life.PLUGIN["name"], "utility_life")
+        self.assertEqual(utility_media.PLUGIN["name"], "utility_media")
+        self.assertEqual(utility_phone.PLUGIN["name"], "utility_phone")
+        self.assertEqual(utility_vault.PLUGIN["name"], "utility_vault")
+        self.assertEqual(youtube_agent.PLUGIN["name"], "youtube_play")
+        self.assertEqual(file_edit.PLUGIN["name"], "file_edit")
+        self.assertEqual(auto_tasks.PLUGIN["name"], "auto_task")
+        self.assertEqual(watchdog24.PLUGIN["name"], "watchdog24")
+        self.assertEqual(youtube_agent.PLUGIN_SETTINGS.get("widget"),
+                         "video_panel")
+        self.assertEqual(auto_tasks.PLUGIN_SETTINGS.get("widget"),
+                         "auto_tasks")
+        self.assertEqual(watchdog24.PLUGIN_SETTINGS.get("widget"),
+                         "running24")
         self.assertEqual(firebase_connect.PLUGIN["name"], "firebase_connect")
         self.assertEqual(hosting_autofix.PLUGIN["name"], "hosting_autofix")
         self.assertEqual(live_screen.PLUGIN["name"], "live_screen")

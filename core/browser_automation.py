@@ -194,6 +194,32 @@ def run_steps(steps: list[dict], driver: Driver,
                 else:
                     ok, msg = driver.fill_form(
                         fields, step.get("submit") or None)
+            elif action == "type":
+                sels = _step_selectors(step)
+                if not sels:
+                    ok, msg = False, "type-e selector dao."
+                else:
+                    last_err = ""
+                    for sel in sels:
+                        ok, msg = driver.type_text(sel, str(step.get("text") or ""))
+                        if ok:
+                            used = sel
+                            break
+                        last_err = msg
+                    if not ok:
+                        msg = last_err or msg
+            elif action == "play":
+                sel = str(step.get("selector") or "").strip() or None
+                ok, msg = driver.play_video(sel)
+            elif action == "key":
+                ok, msg = driver.press_key(str(step.get("key") or ""))
+            elif action == "set_file":
+                sel = str(step.get("selector") or "").strip()
+                path = str(step.get("path") or "").strip()
+                if not sel or not path:
+                    ok, msg = False, "set_file-e selector + path dao."
+                else:
+                    ok, msg = driver.set_input_files(sel, path)
             elif action == "new_tab":
                 ok, msg = driver.new_tab(str(step.get("url") or "") or None)
             elif action == "switch_tab":
@@ -508,3 +534,78 @@ def render_deploy(service_name: str, repo_url: str, branch: str = "main",
                     pass
     except Exception as e:
         return False, f"Render deploy korte parlam na: {e}"
+
+
+# ── Advanced Browser Control: login wall + human steps ───────────────────────
+_LOGIN_WALL_MARKERS = ("log in", "sign in", "login", "sign up", "create account",
+                       "continue with google", "continue with facebook",
+                       "enter your password", "forgot password", "otp",
+                       "verify your identity", "two-step verification")
+
+
+def login_wall_detected(text: str | None) -> bool:
+    """True when page text looks like a login wall (not logged in)."""
+    if not text:
+        return False
+    low = text.lower()
+    return any(m in low for m in _LOGIN_WALL_MARKERS)
+
+
+def login_status_text(driver, site_name: str = "") -> str:
+    """One-line login status for the current page (honest when unknown)."""
+    try:
+        ok, page = driver.read_text()
+        if not ok:
+            return "🔒 Login status jana gelo na (page pora gelo na)."
+        if login_wall_detected(page):
+            return (f"🔒 {site_name or 'Ei site'}-e login kora nei — Chrome-e "
+                    "age login koro.")
+        return f"✅ {site_name or 'Site'}-e login ache mone hochhe."
+    except Exception:
+        return "🔒 Login status jana gelo na."
+
+
+def run_human_actions(actions, driver=None, report_fn=None):
+    """Run a list of step dicts one by one, reporting EVERY step live
+    through report_fn (or printing) — so the user sees
+    "step 1/5 khullam ✅ ... step 3/5 click korlam ❌".
+
+    Actions use the same step dicts as run_steps (label, action, url,
+    selectors/selector, text, wait_s, verify, key, ...). Returns
+    (ok, message) where the message is the full step report.
+    """
+    from core import browser_driver as _drv
+    own_driver = False
+    if driver is None:
+        driver, _backend, msg = _drv.ensure_driver()
+        if driver is None:
+            return False, msg
+        own_driver = True
+    report = []
+    def _say(text):
+        report.append(text)
+        if report_fn is not None:
+            try:
+                report_fn(text)
+            except Exception:
+                pass
+    try:
+        total = len(actions)
+        for i, step in enumerate(actions, start=1):
+            label = step.get("label") or step.get("action") or f"step {i}"
+            trace: list[dict] = []
+            ok, msg = run_steps([step], driver, trace=trace)
+            mark = "✅" if ok else "❌"
+            _say(f"Step {i}/{total}: {label} {mark} — {msg}")
+            if not ok:
+                _say(f"Step {i}-e theme gelam ({label}) — page-ta khola "
+                     "achhe, tumi hate kore nite paro.")
+                return False, "\n".join(report)
+        _say(f"✅ Sob {total}-ta step shesh holo.")
+        return True, "\n".join(report)
+    finally:
+        if own_driver:
+            try:
+                driver.close()
+            except Exception:
+                pass

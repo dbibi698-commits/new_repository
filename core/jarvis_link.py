@@ -133,6 +133,10 @@ class JarvisLink:
         # Latest phone screenshot fetched by fetch_phone_screen() — the
         # dashboard serves it at /api/phone-screen (+ /phone-screen page).
         self._last_phone_screen_at = ""
+        # Last time ANY message arrived from the phone (ISO). The 24h
+        # status box + Tasks panel use it to show the phone's background
+        # state (alive / silent for X minutes). "" = never heard from it.
+        self.last_phone_seen = ""
 
     # ------------------------------------------------------------ config
 
@@ -288,7 +292,13 @@ class JarvisLink:
             "pair_code": self._pair_code,
             "e2e": self.e2e_on,
             "version": APP_VERSION,
+            "last_phone_seen": self.last_phone_seen,
         }
+
+    def send_text(self, text: str) -> bool:
+        """Send a plain text message to the phone (E2E when on).
+        Used by auto-tasks (TASK_SCHEDULE::) and other PC->phone sends."""
+        return self.send_to_phone("text", text)
 
     def refresh_code(self) -> str:
         self._pair_code = ""
@@ -627,14 +637,71 @@ class JarvisLink:
             except Exception as e:
                 print(f"[Jarvis Link] message handle error: {e!r}")
 
+    def _handle_location_update(self, text: str) -> None:
+        """Record one phone GPS fix (JSON or 'Lat: .., Lng: ..' text).
+        Never raises; never fakes a fix."""
+        try:
+            from core import phone_location as _pl
+            fix = _pl.parse_location_text(str(text or ""))
+            if fix is None:
+                try:
+                    data = _json_payload(str(text or ""))
+                    lat = data.get("lat", data.get("latitude"))
+                    lon = data.get("lng", data.get("lon",
+                                   data.get("longitude")))
+                    if lat is not None and lon is not None:
+                        fix = {"lat": float(lat), "lon": float(lon),
+                               "accuracy": data.get("accuracy")}
+                except Exception:
+                    fix = None
+            if fix is None:
+                self.log("[Jarvis Link] 📍 Location update bujhlam na.")
+                return
+            stored = _pl.record_fix(fix.get("lat"), fix.get("lon"),
+                                    fix.get("accuracy"))
+            if stored:
+                self.log(f"[Jarvis Link] 📍 Phone location: "
+                         f"{stored['lat']:.5f}, {stored['lon']:.5f}")
+        except Exception as e:
+            self.log(f"[Jarvis Link] location handle error: {e!r}")
+
     # ------------------------------------------------------------ inbox in
 
     def _handle_message(self, msg: dict) -> None:
         kind = msg.get("kind", "")
         text = msg.get("text", "") or ""
         audio_file = msg.get("audio_file", "") or ""
+        # Any message from the phone = the phone is alive. The 24h status
+        # box + Tasks panel read last_phone_seen.
+        try:
+            from datetime import datetime as _dt
+            self.last_phone_seen = _dt.now().isoformat(timespec="seconds")
+        except Exception:
+            pass
+        if kind == "location_update":
+            # Dedicated kind from the phone (v1.9.9): text = JSON
+            # {lat, lng, accuracy} or "Lat: .., Lng: ..".
+            self._handle_location_update(text)
+            return
         if kind == "text":
             plain = self._e2e_decrypt(text)
+            # Phone reports (text-prefix fallbacks — the reliable path):
+            # LOCATION_UPDATE:: — the phone's GPS fix; TASK_REPORT:: — a
+            # scheduled task the phone ran while the PC was off. Neither
+            # needs a reply; both are recorded, not answered.
+            try:
+                if plain.startswith("LOCATION_UPDATE::"):
+                    self._handle_location_update(
+                        plain[len("LOCATION_UPDATE::"):])
+                    return
+                if plain.startswith("TASK_REPORT::"):
+                    from core import auto_tasks as _at
+                    self.log("[Jarvis Link] " + _at.handle_task_report(
+                        plain[len("TASK_REPORT::"):]))
+                    return
+            except Exception as e:
+                self.log(f"[Jarvis Link] phone report handle error: {e!r}")
+                return
             # Phone-er Commander orders + prefixed fallbacks — the text
             # path is always allowed by the relay, so these work even if
             # the backend allowlist has no dedicated kind yet. Everything

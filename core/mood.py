@@ -22,8 +22,51 @@ MOODS = {
                 "calm, focused, precise — no jokes, just the work."),
     "boss": ("👑", "Boss-style",
              "short, direct, confident — the boss's own way of talking."),
+    "girlfriend": ("💕", "Girlfriend",
+                   "warm, affectionate, a little playful — like a loving "
+                   "girlfriend: sweet, caring, gently teasing, always on "
+                   "the boss's side."),
+    "comedy": ("😂", "Comedy",
+               "funny above all — quick jokes, playful teasing, light "
+               "one-liners in every reply, never mean, never at the "
+               "boss's expense when he is serious."),
 }
+
 _DEFAULT = "friendly"
+
+
+_MODE_TONE = {
+    # Per-mode TTS multipliers for the LOCAL TTS fallback (rate, pitch).
+    # Girlfriend: a little slower + warmer (higher pitch). Comedy: a
+    # little faster + brighter. Boss: steady, slightly slower, lower.
+    "girlfriend": (0.95, 1.15),
+    "comedy": (1.10, 1.10),
+    "boss": (0.95, 0.90),
+    "playful": (1.05, 1.05),
+    "caring": (0.95, 1.05),
+    "serious": (1.0, 0.95),
+    "friendly": (1.0, 1.0),
+}
+
+_MODE_STYLE = {
+    # Extra style lines so the mode MUST change the reply, not just the badge.
+    "girlfriend": ("Talk like a loving girlfriend: warm pet names (jan, "
+                   "shona) when it fits, affectionate, a little playful "
+                   "teasing, always on his side."),
+    "comedy": ("Be funny in EVERY reply: a quick joke, a playful one-liner "
+               "or light teasing — even for boring tasks. Keep it short "
+               "and clean."),
+    "boss": ("The user is the BOSS. Be crisp, efficient, respectful: short "
+             "answers, no fluff, no jokes unless he asks. 'Ji boss' tone."),
+}
+
+
+def mode_tone() -> tuple[float, float]:
+    """(rate, pitch) multipliers for the current mood. Pure. Never raises."""
+    try:
+        return _MODE_TONE.get(current()["key"], (1.0, 1.0))
+    except Exception:
+        return (1.0, 1.0)
 
 
 def normalize(raw) -> str:
@@ -64,6 +107,9 @@ def prompt_paragraph() -> str:
         f"Your mood right now is {m['name']} {m['emoji']} — {m['desc']}",
         "Think briefly before you answer — short, thoughtful, not rushed.",
     ]
+    style = _MODE_STYLE.get(m["key"])
+    if style:
+        lines.append(style)
     if m["mirror_boss_style"]:
         lines.append(
             "Mirror the boss's own style: short Banglish/Hindi-mix bursts, "

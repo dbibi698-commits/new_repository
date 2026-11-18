@@ -1937,6 +1937,118 @@ load(); setInterval(load, 4000);
 </script></body></html>""".replace("__TOK__", tok)
             return HTMLResponse(html)
 
+        @app.get("/api/location")
+        async def location_api(req: Request):
+            """📍 Phone location — last fix + history (last 50) + map link.
+
+            Same auth as /api/agents: Bearer <redacted>, 401 without it.
+            Coordinates are NEVER faked — empty when the phone has not
+            sent a location_update yet (needs GPS + permission + Owner
+            monitoring ON on the phone)."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import phone_location as _pl
+                last = _pl.last_fix()
+                hist = _pl.history()
+                return JSONResponse({
+                    "last": last,
+                    "history": hist,
+                    "count": len(hist),
+                    "maps_url": (
+                        f"https://www.openstreetmap.org/?mlat={last['lat']}"
+                        f"&mlon={last['lon']}#map=16/{last['lat']}/{last['lon']}"
+                        if last else ""),
+                })
+            except Exception as e:
+                return JSONResponse({"last": None, "history": [],
+                                     "count": 0, "maps_url": "",
+                                     "error": str(e)[:120]})
+
+        @app.get("/map", response_class=HTMLResponse)
+        async def map_page(req: Request, token: str = ""):
+            """🗺️ Location map — the phone on OpenStreetMap (Leaflet) with
+            a marker + the last-50 history list. Re-polls /api/location
+            every 5 s. Needs internet for the map tiles.
+
+            Same pattern as /phone-screen: auth via ?token= query param."""
+            if not _valid(token.strip()):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            tok = token.strip().replace('"', "")
+            html = """<!DOCTYPE html>
+<html lang="bn"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>📍 Phone Location — Mark-LVII</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+body{background:#0b0f16;color:#e6f1ff;font-family:monospace;margin:0;padding:16px}
+h1{color:#22d3ee;font-size:20px;text-align:center} p{color:#8fa3bf;font-size:13px;text-align:center}
+#map{height:55vh;border:2px solid #22d3ee;border-radius:12px}
+#hist{max-width:640px;margin:12px auto;font-size:12px;color:#cbd5e1}
+#st{color:#4ade80;text-align:center}
+</style></head><body>
+<h1>📍 Phone Location (map)</h1>
+<p>Phone-er GPS fix — OpenStreetMap. Map tiles-er jonno internet lagbe. Phone-e GPS + Location permission ON thakte hobe.</p>
+<p id="st">Loading…</p>
+<div id="map"></div>
+<div id="hist"></div>
+<script>
+const TOK = "__TOK__";
+let map = null, marker = null;
+async function load(){
+  try {
+    const r = await fetch('/api/location', {headers:{'Authorization':'Bearer '+TOK}});
+    const d = await r.json();
+    if (!d.last) { document.getElementById('st').textContent = '⏳ Location ekhono ashe ni — phone-ke Find phone bolo.'; return; }
+    const lat = d.last.lat, lon = d.last.lon;
+    document.getElementById('st').textContent = '✅ Lat ' + lat + ', Lng ' + lon + ' • ' + (d.last.at || '');
+    if (!map) {
+      map = L.map('map').setView([lat, lon], 16);
+      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: '© OpenStreetMap'}).addTo(map);
+      marker = L.marker([lat, lon]).addTo(map).bindPopup('📱 Phone — ' + (d.last.at || ''));
+    } else {
+      map.setView([lat, lon], map.getZoom());
+      marker.setLatLng([lat, lon]).bindPopup('📱 Phone — ' + (d.last.at || ''));
+    }
+    const h = (d.history || []).slice(-10).reverse();
+    document.getElementById('hist').innerHTML = '<b>History (last ' + (d.history || []).length + '):</b><br>' +
+      h.map(x => '• ' + x.lat + ', ' + x.lon + ' — ' + (x.at || '')).join('<br>');
+  } catch(e) { document.getElementById('st').textContent = '⏳ Location ante parlam na — ' + e; }
+}
+load(); setInterval(load, 5000);
+</script></body></html>""".replace("__TOK__", tok)
+            return HTMLResponse(html)
+
+        @app.get("/api/tasks")
+        async def tasks_api(req: Request):
+            """📋 Automatic Tasks — tasks + history (with executor: phone /
+            pc / backend) + offline queue + the PC-off honesty note.
+
+            Same auth as /api/agents: Bearer <redacted>, 401 without it.
+            Never raises — an engine failure returns empty lists + error."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core import automation as _a
+                from core import auto_tasks as _at
+                from memory.config_manager import get_plugin_config
+                tasks = _a.ENGINE.list_tasks()
+                for t in tasks:
+                    t["executor"] = _at.executor_of(str(t.get("id") or ""))
+                cfg = dict(get_plugin_config("auto_tasks") or {})
+                return JSONResponse({
+                    "tasks": tasks,
+                    "history": _a.ENGINE.history()[-20:],
+                    "offline_queue": list(cfg.get("offline_queue") or []),
+                    "pc_off_note": _at.PC_OFF_NOTE,
+                })
+            except Exception as e:
+                return JSONResponse({"tasks": [], "history": [],
+                                     "offline_queue": [],
+                                     "pc_off_note": "",
+                                     "error": str(e)[:120]})
+
         @app.get("/agents", response_class=HTMLResponse)
         async def agents_page(req: Request, token: str = ""):
             """🤖 Agents — live view of the 7 worker agents.

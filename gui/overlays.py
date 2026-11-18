@@ -1688,6 +1688,14 @@ class PluginSettingsOverlay(QWidget):
     _sb_done = pyqtSignal(str)                 # software build finished: result text
     _cmd_done = pyqtSignal(str)                # commander order finished: result text
     _pe_done = pyqtSignal(str)                 # photo editor finished: result text
+    _vu_done = pyqtSignal(str)                 # video upload finished: result text
+    _sa_done = pyqtSignal(str)                 # social auto finished: result text
+    _mve_done = pyqtSignal(str)                # mouse video edit finished: result text
+    _ab_done = pyqtSignal(str)                 # advanced browser finished: result text
+    _modes_done = pyqtSignal(str)              # mood switch finished: result text
+    _running24_done = pyqtSignal(str)          # 24h status refresh finished: text
+    _auto_tasks_done = pyqtSignal(str)         # auto-tasks action finished: text
+    _video_panel_done = pyqtSignal(str)        # video panel action finished: text
     _OW = 460
 
     def __init__(self, sections: list[dict], parent=None):
@@ -1724,6 +1732,14 @@ class PluginSettingsOverlay(QWidget):
         self._sb_done.connect(self._on_sb_done)
         self._cmd_done.connect(self._on_cmd_done)
         self._pe_done.connect(self._on_pe_done)
+        self._vu_done.connect(self._on_vu_done)
+        self._sa_done.connect(self._on_sa_done)
+        self._mve_done.connect(self._on_mve_done)
+        self._ab_done.connect(self._on_ab_done)
+        self._modes_done.connect(self._on_modes_done)
+        self._running24_done.connect(self._on_running24_done)
+        self._auto_tasks_done.connect(self._on_auto_tasks_done)
+        self._video_panel_done.connect(self._on_video_panel_done)
         # Python Run box widgets (built by _build_python_run_box).
         self._py_code = None
         self._py_folder = None
@@ -1746,6 +1762,16 @@ class PluginSettingsOverlay(QWidget):
         self._sb_build_btn = None
         self._sb_servers = None
         self._sb_out = None
+        self._sb_autopush = None   # auto-push checkbox (Software Builder box)
+        # Modes box widgets (built by _build_modes_box).
+        self._modes_out = None
+        # 24H Running box widgets (built by _build_running24_box).
+        self._running24_out = None
+        # Auto Tasks box widgets (built by _build_auto_tasks_box).
+        self._auto_tasks_input = None
+        self._auto_tasks_out = None
+        # Video panel box widgets (built by _build_video_panel_box).
+        self._video_panel_out = None
         # Commander box widgets (built by _build_commander_box).
         self._cmd_order = None
         self._cmd_btn = None
@@ -1767,6 +1793,50 @@ class PluginSettingsOverlay(QWidget):
         self._pe_method = None
         self._pe_sheet_btn = None
         self._pe_out = None
+        # Video Upload box widgets (built by _build_video_upload_box).
+        self._vu_site = None
+        self._vu_file = None
+        self._vu_caption = None
+        self._vu_title = None
+        self._vu_manual = None
+        self._vu_limits = None
+        self._vu_upload_btn = None
+        self._vu_open_btn = None
+        self._vu_take_btn = None
+        self._vu_hand_btn = None
+        self._vu_out = None
+        # Social Auto box widgets (built by _build_social_auto_box).
+        self._sa_checks = None
+        self._sa_profile = None
+        self._sa_text = None
+        self._sa_approve_btn = None
+        self._sa_like_btn = None
+        self._sa_comment_btn = None
+        self._sa_msg_btn = None
+        self._sa_log = None
+        # Mouse Video Editor box widgets (built by _build_mouse_video_edit_box).
+        self._mve_status = None
+        self._mve_video = None
+        self._mve_ops = None
+        self._mve_text = None
+        self._mve_upload = None
+        self._mve_site = None
+        self._mve_edit_btn = None
+        self._mve_detect_btn = None
+        self._mve_app = None
+        self._mve_app_text = None
+        self._mve_app_btn = None
+        self._mve_out = None
+        # Advanced Browser box widgets (built by _build_advanced_browser_box).
+        self._ab_url = None
+        self._ab_action = None
+        self._ab_selector = None
+        self._ab_text = None
+        self._ab_open_btn = None
+        self._ab_run_btn = None
+        self._ab_login_btn = None
+        self._ab_login_lbl = None
+        self._ab_out = None
         # Agent cards box widgets (built by _build_agent_cards_box).
         self._agent_cards: dict[str, dict] = {}  # card_id -> {status, btn}
         self._agent_cards_lay = None
@@ -1983,6 +2053,22 @@ class PluginSettingsOverlay(QWidget):
             self._build_voice_settings_box(form)
         if sec.get("widget") == "photo_editor":
             self._build_photo_editor_box(form)
+        if sec.get("widget") == "video_upload_browser":
+            self._build_video_upload_box(form)
+        if sec.get("widget") == "social_auto":
+            self._build_social_auto_box(form)
+        if sec.get("widget") == "mouse_video_edit":
+            self._build_mouse_video_edit_box(form)
+        if sec.get("widget") == "advanced_browser":
+            self._build_advanced_browser_box(form)
+        if sec.get("widget") == "modes":
+            self._build_modes_box(form)
+        if sec.get("widget") == "running24":
+            self._build_running24_box(form)
+        if sec.get("widget") == "auto_tasks":
+            self._build_auto_tasks_box(form)
+        if sec.get("widget") == "video_panel":
+            self._build_video_panel_box(form)
 
         line = QFrame(); line.setFrameShape(QFrame.Shape.HLine)
         line.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
@@ -2854,6 +2940,19 @@ class PluginSettingsOverlay(QWidget):
         _wrap = QWidget(); _wrap.setLayout(_row)
         form.addWidget(_wrap)
 
+        # Auto-push: build + test shesh hole GitHub-e push koro (saved
+        # token thakle). Toggle-ti config-e save hoy; build_and_run
+        # protibar porle.
+        self._sb_autopush = QCheckBox("🚀 Build shesh hole GitHub-e auto-push koro")
+        self._sb_autopush.setFont(hud_font(9))
+        try:
+            from core import auto_push as _ap
+            self._sb_autopush.setChecked(_ap.auto_push_enabled())
+        except Exception:
+            pass
+        self._sb_autopush.toggled.connect(self._on_sb_autopush_toggled)
+        form.addWidget(self._sb_autopush)
+
         form.addWidget(self._lbl("TEMPLATE (boro project-er jonno)",
                                  8, color=C.TEXT_DIM))
         self._sb_template = QComboBox()
@@ -2959,6 +3058,315 @@ class PluginSettingsOverlay(QWidget):
                         "🌐 Localhost server: ekhono kono server cholche na.")
             except Exception:
                 pass
+
+    # ── Modes box (🎭 MODES — Girlfriend / Comedy / Boss) ───────────────────
+    def _build_modes_box(self, form: QVBoxLayout):
+        """Quick-switch buttons for the three named modes + current mode.
+        The switch saves plugin_config['jarvis_mood']; the next Live
+        session prompt and the local TTS tone follow it. Worker thread +
+        _modes_done so only the Qt thread touches widgets."""
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🎭  MODES — Girlfriend / Comedy / Boss",
+                                 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Mode bodlale uttor-er style bodle jabe — Girlfriend: warm/misti, "
+            "Comedy: prottek uttor-e moja, Boss: short, direct, 'Ji boss'. "
+            "Mood ekta tone setting — asol emotion noy.", 8, color=C.TEXT_DIM))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        for label, mood in (("💕 Girlfriend", "girlfriend"),
+                            ("😂 Comedy", "comedy"),
+                            ("👑 Boss", "boss")):
+            b = QPushButton(label)
+            b.setFont(hud_font(9, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f"color: {C.PRI}; background: {C.PANEL2}; "
+                f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 6px;")
+            b.clicked.connect(lambda _c=False, m=mood: self._on_mode_switch(m))
+            row.addWidget(b)
+        _wrap = QWidget(); _wrap.setLayout(row)
+        form.addWidget(_wrap)
+        try:
+            from core import mood as _m
+            cur = _m.current()
+            self._modes_out = self._lbl(
+                f"Ekhon: {cur['emoji']} {cur['name']} — {cur['desc']}",
+                8, color=C.TEXT_DIM)
+        except Exception:
+            self._modes_out = self._lbl("", 8, color=C.TEXT_DIM)
+        form.addWidget(self._modes_out)
+
+    def _on_mode_switch(self, mood: str):
+        def _work():
+            try:
+                from core import mood as _m
+                from memory.config_manager import save_plugin_config, get_plugin_config
+                key = _m.normalize(mood)
+                cfg = dict(get_plugin_config("jarvis_mood") or {})
+                cfg["mood"] = key
+                save_plugin_config("jarvis_mood", cfg)
+                _, name, desc = _m.MOODS[key]
+                self._modes_done.emit(
+                    f"✅ Mood: {name} — {desc} Ekhon theke ei style-e kotha bolbo.")
+            except Exception as e:
+                self._modes_done.emit(f"Mood bodlate parlam na: {e}")
+        threading.Thread(target=_work, daemon=True, name="mode-switch").start()
+
+    def _on_modes_done(self, msg: str):
+        if self._modes_out is not None:
+            self._modes_out.setText(msg or "")
+
+    # ── 24H Running box (🕐 24H RUNNING) ─────────────────────────────────────
+    def _build_running24_box(self, form: QVBoxLayout):
+        """Uptime + autostart + watchdog + phone background status. The
+        box says plainly: PC restart / Windows update still needs
+        autostart; nothing runs while the PC is fully off."""
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🕐  24H RUNNING — uptime, autostart, watchdog",
+                                 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Mark kotokhon dhore cholche, autostart ON kina, watchdog "
+            "service gulo dekhche kina, ar phone-er background kemon ache — "
+            "sob ekhane. PC bondho thakle kichui cholbe na — eta mone rekho.",
+            8, color=C.TEXT_DIM))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        b = QPushButton("🔄  Refresh")
+        b.setFont(hud_font(9, QFont.Weight.Bold))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 6px;")
+        b.clicked.connect(self._on_running24_refresh)
+        row.addWidget(b)
+        b = QPushButton("🩺  Watchdog check")
+        b.setFont(hud_font(9, QFont.Weight.Bold))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 6px;")
+        b.clicked.connect(self._on_running24_check)
+        row.addWidget(b)
+        row.addStretch()
+        _wrap = QWidget(); _wrap.setLayout(row)
+        form.addWidget(_wrap)
+        self._running24_out = self._lbl("", 8, color=C.TEXT_DIM)
+        form.addWidget(self._running24_out)
+
+    def _on_running24_refresh(self):
+        def _work():
+            try:
+                from core import watchdog24 as _w
+                self._running24_done.emit(_w.status_text())
+            except Exception as e:
+                self._running24_done.emit(f"24h status dekhte parlam na: {e}")
+        threading.Thread(target=_work, daemon=True,
+                         name="running24-refresh").start()
+
+    def _on_running24_check(self):
+        def _work():
+            try:
+                from core import watchdog24 as _w
+                res = _w.check_now()
+                if res:
+                    bits = ", ".join(
+                        f"{r.get('name')}: "
+                        f"{'✅ alive' if r.get('alive') else '🔄 restarted' if r.get('restarted') else '❌ dead'}"
+                        for r in res)
+                else:
+                    bits = "kono service register kora nei"
+                self._running24_done.emit(
+                    "🩺 Watchdog check: " + bits + "\n" + _w.status_text())
+            except Exception as e:
+                self._running24_done.emit(f"Watchdog check korte parlam na: {e}")
+        threading.Thread(target=_work, daemon=True,
+                         name="running24-check").start()
+
+    def _on_running24_done(self, msg: str):
+        if self._running24_out is not None:
+            self._running24_out.setText(msg or "")
+
+    # ── Auto Tasks box (📋 AUTOMATIC TASKS) ──────────────────────────────────
+    def _build_auto_tasks_box(self, form: QVBoxLayout):
+        """Create a task by text + the Tasks panel (queue / running / done /
+        failed + ke chalalo: phone / pc / backend). PC-off honesty is in
+        the panel text itself."""
+        form.addSpacing(6)
+        form.addWidget(self._lbl("📋  AUTOMATIC TASKS — nije nije cholbe",
+                                 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Jemon: 'protidin sokal 8-tay weather report dao', 'proti "
+            "Robibar Downloads organize koro', '1 minute pore ekta test "
+            "report banao'. Commander chalabe — phone-er task phone-e cholbe, "
+            "PC off thakleo; PC-r task PC chalu hole cholbe.",
+            8, color=C.TEXT_DIM))
+        self._auto_tasks_input = QLineEdit()
+        self._auto_tasks_input.setPlaceholderText(
+            "protidin sokal 8-tay weather report dao")
+        self._auto_tasks_input.setFont(hud_font(10))
+        self._auto_tasks_input.setFixedHeight(30)
+        self._auto_tasks_input.setStyleSheet(self._fs)
+        form.addWidget(self._auto_tasks_input)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        b = QPushButton("➕  Task banao")
+        b.setFont(hud_font(9, QFont.Weight.Bold))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 6px;")
+        b.clicked.connect(self._on_auto_task_create)
+        row.addWidget(b)
+        b = QPushButton("🔄  Refresh")
+        b.setFont(hud_font(9, QFont.Weight.Bold))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 6px;")
+        b.clicked.connect(self._on_auto_tasks_refresh)
+        row.addWidget(b)
+        row.addStretch()
+        _wrap = QWidget(); _wrap.setLayout(row)
+        form.addWidget(_wrap)
+        self._auto_tasks_out = QTextEdit()
+        self._auto_tasks_out.setReadOnly(True)
+        self._auto_tasks_out.setFont(mono_font(8))
+        self._auto_tasks_out.setFixedHeight(140)
+        self._auto_tasks_out.setStyleSheet(self._fs.replace("QLineEdit", "QTextEdit"))
+        form.addWidget(self._auto_tasks_out)
+
+    def _on_auto_task_create(self):
+        text = (self._auto_tasks_input.text() or "").strip() \
+            if self._auto_tasks_input else ""
+        if not text:
+            if self._auto_tasks_out is not None:
+                self._auto_tasks_out.setPlainText("Task-ta ki — likho.")
+            return
+        if self._auto_tasks_out is not None:
+            self._auto_tasks_out.setPlainText("⏳ Task banacchi…")
+
+        def _work():
+            try:
+                from core import auto_tasks as _at
+                res = _at.create_task_from_text(text)
+                self._auto_tasks_done.emit(res + "\n\n" + _at.tasks_panel_text())
+            except Exception as e:
+                self._auto_tasks_done.emit(f"Task banate parlam na: {e}")
+        threading.Thread(target=_work, daemon=True,
+                         name="auto-task-create").start()
+
+    def _on_auto_tasks_refresh(self):
+        def _work():
+            try:
+                from core import auto_tasks as _at
+                self._auto_tasks_done.emit(_at.tasks_panel_text())
+            except Exception as e:
+                self._auto_tasks_done.emit(f"Tasks dekhte parlam na: {e}")
+        threading.Thread(target=_work, daemon=True,
+                         name="auto-tasks-refresh").start()
+
+    def _on_auto_tasks_done(self, msg: str):
+        if self._auto_tasks_out is not None:
+            self._auto_tasks_out.setPlainText(msg or "")
+
+    # ── Video panel box (📺 VIDEO — Mark-er nijer screen) ───────────────────
+    def _build_video_panel_box(self, form: QVBoxLayout):
+        """What is playing now + Play / Pause + YouTube token state.
+        The video plays on Mark's own video screen (HUD player, else
+        Chrome) — Like/Comment need a fresh OAuth token, never faked."""
+        form.addSpacing(6)
+        form.addWidget(self._lbl("📺  VIDEO — Mark-er nijer video screen",
+                                 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "YouTube video Mark-er nijer screen-e cholbe (HUD player, na "
+            "hole Chrome). Like/Comment korte fresh YouTube OAuth token "
+            "lagbe — token na thakle 'login lagbe' bolbe, fake kokhono na.",
+            8, color=C.TEXT_DIM))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        b = QPushButton("▶  Play last video")
+        b.setFont(hud_font(9, QFont.Weight.Bold))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 6px;")
+        b.clicked.connect(self._on_video_panel_play)
+        row.addWidget(b)
+        b = QPushButton("⏸  Pause")
+        b.setFont(hud_font(9, QFont.Weight.Bold))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 6px;")
+        b.clicked.connect(lambda _c=False: self._on_video_panel_pause(True))
+        row.addWidget(b)
+        b = QPushButton("▶  Resume")
+        b.setFont(hud_font(9, QFont.Weight.Bold))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 6px;")
+        b.clicked.connect(lambda _c=False: self._on_video_panel_pause(False))
+        row.addWidget(b)
+        row.addStretch()
+        _wrap = QWidget(); _wrap.setLayout(row)
+        form.addWidget(_wrap)
+        self._video_panel_out = self._lbl("", 8, color=C.TEXT_DIM)
+        form.addWidget(self._video_panel_out)
+        # Show the current video + token state at once.
+        try:
+            from core import youtube_agent as _yt
+            self._video_panel_out.setText(_yt.video_panel_text())
+        except Exception:
+            pass
+
+    def _on_video_panel_play(self):
+        def _work():
+            try:
+                from core import youtube_agent as _yt
+                cur = _yt.current_video()
+                if not cur.get("url"):
+                    self._video_panel_done.emit(
+                        "📺 Ekhon kono video nei — YouTube card theke ba "
+                        "voice-e 'YouTube-e ... chalao' bolo.")
+                    return
+                res = _yt.play_video(str(cur.get("url")))
+                self._video_panel_done.emit(res)
+            except Exception as e:
+                self._video_panel_done.emit(f"Video chalate parlam na: {e}")
+        threading.Thread(target=_work, daemon=True,
+                         name="video-panel-play").start()
+
+    def _on_video_panel_pause(self, pause: bool):
+        """Pause/Resume the HUD video player via the MainWindow signal."""
+        try:
+            win = self.window()
+            sig = getattr(win, "_video_pause_sig", None)
+            if sig is not None:
+                sig.emit(bool(pause))
+                if self._video_panel_out is not None:
+                    self._video_panel_out.setText(
+                        "⏸ Video pause korlam." if pause
+                        else "▶ Video abar chalacchi.")
+            elif self._video_panel_out is not None:
+                self._video_panel_out.setText(
+                    "Video player-er signal pelam na — HUD-e video cholche na.")
+        except Exception as e:
+            if self._video_panel_out is not None:
+                self._video_panel_out.setText(f"Pause korte parlam na: {e}")
+
+    def _on_video_panel_done(self, msg: str):
+        if self._video_panel_out is not None:
+            self._video_panel_out.setText(msg or "")
+
+    def _on_sb_autopush_toggled(self, checked: bool):
+        """Software Builder box checkbox -> auto_push toggle in config."""
+        try:
+            from core import auto_push as _ap
+            _ap.set_auto_push(bool(checked))
+        except Exception:
+            pass
 
     # ── Commander box (🎖️ COMMANDER) ─────────────────────────────────────────
     def _build_commander_box(self, form: QVBoxLayout):
@@ -3302,6 +3710,773 @@ class PluginSettingsOverlay(QWidget):
             self._pe_sheet_btn.setEnabled(True)
         if self._pe_out is not None:
             self._pe_out.setPlainText(msg or "Kichu uttor elo na.")
+
+    def _build_video_upload_box(self, form: QVBoxLayout):
+        """'📤 VIDEO UPLOAD' box: site + file + caption + Manual/Auto + Upload.
+
+        Browser diye manusher moto upload (Create → file select → caption
+        → Share/Publish). Login lagbe prottek site-e — tomar nijer Chrome
+        account; ami password dekhi na, rakhi na. Manual mode-e tumi click
+        koro, ami dekhi/narrate kori; 'Tumi koro' chaple ami oi page thekei
+        niye ni. Upload runs on a worker thread; the result comes back
+        through _vu_done so only the Qt thread touches widgets.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl(
+            "📤  VIDEO UPLOAD — Instagram / Facebook / YouTube (browser)",
+            10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Browser diye manusher moto upload: Create → file select → "
+            "caption → Share/Publish. Login lagbe prottek site-e (tomar "
+            "nijer Chrome account — ami password dekhi na). Browser upload "
+            "API-r cheye slow, kintu human-like. Site redesign hole step-er "
+            "naam bolei theme jabo, page-ta khola thakbe.",
+            8, color=C.TEXT_DIM))
+
+        _row = QHBoxLayout(); _row.setSpacing(6)
+        self._vu_site = QComboBox()
+        self._vu_site.addItems(["Instagram", "Facebook", "YouTube"])
+        self._vu_site.setFont(hud_font(9))
+        self._vu_site.setFixedHeight(30)
+        self._vu_site.setStyleSheet(
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 8px; }}")
+        _row.addWidget(self._vu_site)
+        self._vu_file = QLineEdit()
+        self._vu_file.setPlaceholderText("Video-r path — Browse chapo")
+        self._vu_file.setFont(hud_font(10))
+        self._vu_file.setFixedHeight(30)
+        self._vu_file.setStyleSheet(self._fs)
+        _row.addWidget(self._vu_file, 1)
+        _browse = QPushButton("📂  BROWSE")
+        _browse.setFixedHeight(30)
+        _browse.setFont(hud_font(8, QFont.Weight.Bold))
+        _browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        _browse.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+        """)
+        _browse.clicked.connect(self._on_vu_browse)
+        _row.addWidget(_browse)
+        _wrap = QWidget(); _wrap.setLayout(_row)
+        form.addWidget(_wrap)
+
+        self._vu_caption = QLineEdit()
+        self._vu_caption.setPlaceholderText("Caption (Instagram/Facebook)")
+        self._vu_caption.setFont(hud_font(10))
+        self._vu_caption.setFixedHeight(30)
+        self._vu_caption.setStyleSheet(self._fs)
+        form.addWidget(self._vu_caption)
+        self._vu_title = QLineEdit()
+        self._vu_title.setPlaceholderText("YouTube title (khali thakle file-er naam)")
+        self._vu_title.setFont(hud_font(10))
+        self._vu_title.setFixedHeight(30)
+        self._vu_title.setStyleSheet(self._fs)
+        form.addWidget(self._vu_title)
+
+        self._vu_manual = QCheckBox("Manual mode — tumi click koro, ami dekhi/narrate kori (Auto thakle ami nije kori)")
+        try:
+            from core import video_upload as _vu
+            self._vu_manual.setChecked(_vu.get_mode() == "manual")
+        except Exception:
+            self._vu_manual.setChecked(False)
+        self._vu_manual.setFont(hud_font(9))
+        form.addWidget(self._vu_manual)
+
+        self._vu_limits = self._lbl(
+            "Limits: Instagram reel 90 min / 4 GB • Facebook video 240 min / "
+            "10 GB • YouTube 12 h / 256 GB (verified), 15 min unverified. "
+            "Site-er niyom bodlate pare.", 8, color=C.TEXT_DIM)
+        form.addWidget(self._vu_limits)
+
+        _btns = QHBoxLayout(); _btns.setSpacing(6)
+        self._vu_upload_btn = QPushButton("📤  UPLOAD KORO")
+        self._vu_open_btn = QPushButton("🌐  UPLOAD PAGE KHOLO")
+        self._vu_take_btn = QPushButton("🤲  TUMI KORO")
+        self._vu_hand_btn = QPushButton("🙋  AMI KORBO")
+        for _b in (self._vu_upload_btn, self._vu_open_btn, self._vu_take_btn,
+                   self._vu_hand_btn):
+            _b.setFixedHeight(30)
+            _b.setFont(hud_font(8, QFont.Weight.Bold))
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _b.setStyleSheet(f"""
+                QPushButton {{ background: #00091a; color: {C.PRI};
+                    border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+                QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            """)
+            _btns.addWidget(_b)
+        self._vu_upload_btn.clicked.connect(self._on_vu_upload)
+        self._vu_open_btn.clicked.connect(self._on_vu_open)
+        self._vu_take_btn.clicked.connect(self._on_vu_takeover)
+        self._vu_hand_btn.clicked.connect(self._on_vu_handback)
+        _wrap2 = QWidget(); _wrap2.setLayout(_btns)
+        form.addWidget(_wrap2)
+
+        self._vu_out = QTextEdit()
+        self._vu_out.setReadOnly(True)
+        self._vu_out.setFont(mono_font(9))
+        self._vu_out.setFixedHeight(120)
+        self._vu_out.setStyleSheet(self._fs.replace("QLineEdit", "QTextEdit"))
+        form.addWidget(self._vu_out)
+
+    def _vu_site_id(self) -> str:
+        return ["instagram", "facebook", "youtube"][
+            self._vu_site.currentIndex()] if self._vu_site else "instagram"
+
+    def _on_vu_browse(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Video kholo", "",
+            "Videos (*.mp4 *.mov *.mkv *.avi *.webm)")
+        if path and self._vu_file is not None:
+            self._vu_file.setText(path)
+
+    def _vu_run(self, fn):
+        for _b in (self._vu_upload_btn, self._vu_open_btn, self._vu_take_btn,
+                   self._vu_hand_btn):
+            if _b is not None:
+                _b.setEnabled(False)
+        if self._vu_out is not None:
+            self._vu_out.setPlainText("⏳ Cholche… prottek step live dekhabe.")
+        try:
+            from core import video_upload as _vu
+            _vu.set_mode("manual" if self._vu_manual.isChecked() else "auto")
+        except Exception:
+            pass
+
+        def worker():
+            try:
+                msg = fn()
+            except Exception as e:
+                msg = f"Video upload korte parlam na: {e}"
+            self._vu_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="video-upload").start()
+
+    def _on_vu_upload(self):
+        file_path = (self._vu_file.text() or "").strip() if self._vu_file else ""
+        caption = (self._vu_caption.text() or "").strip() if self._vu_caption else ""
+        title = (self._vu_title.text() or "").strip() if self._vu_title else ""
+        site = self._vu_site_id()
+        if not file_path:
+            if self._vu_out is not None:
+                self._vu_out.setPlainText("Video-r path dao — Browse chapo.")
+            return
+        def _do():
+            from core import video_upload as _vu
+            ok, msg = _vu.upload_video(site, file_path, caption=caption,
+                                       title=title)
+            return msg
+        self._vu_run(_do)
+
+    def _on_vu_open(self):
+        site = self._vu_site_id()
+        def _do():
+            from core import video_upload as _vu
+            ok, msg = _vu.open_upload_page(site)
+            return msg
+        self._vu_run(_do)
+
+    def _on_vu_takeover(self):
+        file_path = (self._vu_file.text() or "").strip() if self._vu_file else ""
+        caption = (self._vu_caption.text() or "").strip() if self._vu_caption else ""
+        title = (self._vu_title.text() or "").strip() if self._vu_title else ""
+        site = self._vu_site_id()
+        def _do():
+            from core import video_upload as _vu
+            ok, msg = _vu.take_over(site, file_path, caption=caption,
+                                    title=title)
+            return msg
+        self._vu_run(_do)
+
+    def _on_vu_handback(self):
+        def _do():
+            from core import video_upload as _vu
+            return _vu.hand_back()
+        self._vu_run(_do)
+
+    def _on_vu_done(self, msg: str):
+        for _b in (self._vu_upload_btn, self._vu_open_btn, self._vu_take_btn,
+                   self._vu_hand_btn):
+            if _b is not None:
+                _b.setEnabled(True)
+        if self._vu_out is not None:
+            self._vu_out.setPlainText(msg or "Kichu uttor elo na.")
+
+    def _build_social_auto_box(self, form: QVBoxLayout):
+        """'💬 SOCIAL AUTO' box: per-action toggles (all OFF by default),
+        approved-text field, like/comment/message buttons, activity log.
+
+        Permission-first: like needs a session approval or Auto-Like ON;
+        comment/message need the EXACT text approved first; auto-reply uses
+        approved templates only. Caps: 30 likes/hour, 150/day, 20–60 s
+        delay. Flows run on a worker thread; results come back through
+        _sa_done so only the Qt thread touches widgets.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl(
+            "💬  SOCIAL AUTO — Instagram / Facebook (permission-first)",
+            10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Kichu post/comment permission chara hobe na. Like: per-session "
+            "approval ba Auto-Like ON. Comment/message: EXACT text age "
+            "approve koro. Auto-reply: approved template-ei, na parle "
+            "tomake escalate korbo. Caps: 30 like/hour, 150/day, 20–60 s "
+            "delay. Warning/captcha pele ekhuni theme jabo.",
+            8, color=C.TEXT_DIM))
+
+        self._sa_checks = {}
+        _labels = {
+            "auto_like": "Auto-Like (per-session approval chara like hobe na)",
+            "auto_comment": "Auto-Comment (approved text/template chara comment hobe na)",
+            "auto_message": "Auto-Message (approved text chara message hobe na)",
+            "auto_reply": "Auto-Reply (approved template-e reply, na parle escalate)",
+        }
+        try:
+            from core import social_auto as _sa
+            _cur = _sa.toggles()
+        except Exception:
+            _cur = {}
+        for _name in ("auto_like", "auto_comment", "auto_message", "auto_reply"):
+            _cb = QCheckBox(_labels[_name])
+            _cb.setChecked(bool(_cur.get(_name, False)))
+            _cb.setFont(hud_font(9))
+            _cb.stateChanged.connect(self._on_sa_toggles)
+            self._sa_checks[_name] = _cb
+            form.addWidget(_cb)
+
+        self._sa_profile = QLineEdit()
+        self._sa_profile.setPlaceholderText("Profile / reel URL (jemon: https://instagram.com/...)")
+        self._sa_profile.setFont(hud_font(10))
+        self._sa_profile.setFixedHeight(30)
+        self._sa_profile.setStyleSheet(self._fs)
+        form.addWidget(self._sa_profile)
+
+        self._sa_text = QLineEdit()
+        self._sa_text.setPlaceholderText("Comment / message-er EXACT text — age Approve chapo")
+        self._sa_text.setFont(hud_font(10))
+        self._sa_text.setFixedHeight(30)
+        self._sa_text.setStyleSheet(self._fs)
+        form.addWidget(self._sa_text)
+
+        _btns = QHBoxLayout(); _btns.setSpacing(6)
+        self._sa_approve_btn = QPushButton("✔️  TEXT APPROVE KORO")
+        self._sa_like_btn = QPushButton("❤️  LIKE KORO")
+        self._sa_comment_btn = QPushButton("💬  COMMENT KORO")
+        self._sa_msg_btn = QPushButton("✉️  MESSAGE KORO")
+        for _b in (self._sa_approve_btn, self._sa_like_btn,
+                   self._sa_comment_btn, self._sa_msg_btn):
+            _b.setFixedHeight(30)
+            _b.setFont(hud_font(8, QFont.Weight.Bold))
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _b.setStyleSheet(f"""
+                QPushButton {{ background: #00091a; color: {C.PRI};
+                    border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+                QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            """)
+            _btns.addWidget(_b)
+        self._sa_approve_btn.clicked.connect(self._on_sa_approve)
+        self._sa_like_btn.clicked.connect(self._on_sa_like)
+        self._sa_comment_btn.clicked.connect(self._on_sa_comment)
+        self._sa_msg_btn.clicked.connect(self._on_sa_message)
+        _wrap = QWidget(); _wrap.setLayout(_btns)
+        form.addWidget(_wrap)
+
+        self._sa_log = QTextEdit()
+        self._sa_log.setReadOnly(True)
+        self._sa_log.setFont(mono_font(9))
+        self._sa_log.setFixedHeight(120)
+        self._sa_log.setStyleSheet(self._fs.replace("QLineEdit", "QTextEdit"))
+        try:
+            from core import social_auto as _sa
+            self._sa_log.setPlainText(_sa.log_text() or "Kono activity ekhono nei.")
+        except Exception:
+            self._sa_log.setPlainText("Kono activity ekhono nei.")
+        form.addWidget(self._sa_log)
+
+    def _on_sa_toggles(self):
+        try:
+            from core import social_auto as _sa
+            for _name, _cb in (self._sa_checks or {}).items():
+                _sa.set_toggle(_name, bool(_cb.isChecked()))
+        except Exception:
+            pass
+
+    def _sa_run(self, fn):
+        for _b in (self._sa_like_btn, self._sa_comment_btn, self._sa_msg_btn):
+            if _b is not None:
+                _b.setEnabled(False)
+
+        def worker():
+            try:
+                msg = fn()
+            except Exception as e:
+                msg = f"Social Auto korte parlam na: {e}"
+            self._sa_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="social-auto").start()
+
+    def _on_sa_approve(self):
+        text = (self._sa_text.text() or "").strip() if self._sa_text else ""
+        if not text:
+            if self._sa_log is not None:
+                self._sa_log.setPlainText("Age comment/message-er text lekho, tarpor Approve chapo.")
+            return
+        try:
+            from core import social_auto as _sa
+            ok = _sa.approve_text(text)
+            if self._sa_log is not None:
+                self._sa_log.setPlainText(
+                    f"✔️ Text approve holo: {text}" if ok
+                    else "Text approve holo na — abar cheshta koro.")
+        except Exception as e:
+            if self._sa_log is not None:
+                self._sa_log.setPlainText(f"Approve korte parlam na: {e}")
+
+    def _on_sa_like(self):
+        url = (self._sa_profile.text() or "").strip() if self._sa_profile else ""
+        if not url:
+            if self._sa_log is not None:
+                self._sa_log.setPlainText("Profile / reel URL dao age.")
+            return
+        def _do():
+            from core import social_auto as _sa
+            res = _sa.run_like(url)
+            return res[1] if isinstance(res, tuple) else str(res)
+        self._sa_run(_do)
+
+    def _on_sa_comment(self):
+        url = (self._sa_profile.text() or "").strip() if self._sa_profile else ""
+        text = (self._sa_text.text() or "").strip() if self._sa_text else ""
+        if not url or not text:
+            if self._sa_log is not None:
+                self._sa_log.setPlainText("Profile URL + comment-er text — duitai lagbe (text age Approve koro).")
+            return
+        def _do():
+            from core import social_auto as _sa
+            res = _sa.run_comment(url, text)
+            return res[1] if isinstance(res, tuple) else str(res)
+        self._sa_run(_do)
+
+    def _on_sa_message(self):
+        url = (self._sa_profile.text() or "").strip() if self._sa_profile else ""
+        text = (self._sa_text.text() or "").strip() if self._sa_text else ""
+        if not url or not text:
+            if self._sa_log is not None:
+                self._sa_log.setPlainText("Profile URL + message-er text — duitai lagbe (text age Approve koro).")
+            return
+        def _do():
+            from core import social_auto as _sa
+            res = _sa.run_message(url, text)
+            return res[1] if isinstance(res, tuple) else str(res)
+        self._sa_run(_do)
+
+    def _on_sa_done(self, msg: str):
+        for _b in (self._sa_like_btn, self._sa_comment_btn, self._sa_msg_btn):
+            if _b is not None:
+                _b.setEnabled(True)
+        if self._sa_log is not None:
+            try:
+                from core import social_auto as _sa
+                self._sa_log.setPlainText((msg or "") + "\n\n— Activity log —\n" + _sa.log_text())
+            except Exception:
+                self._sa_log.setPlainText(msg or "Kichu uttor elo na.")
+
+    def _build_mouse_video_edit_box(self, form: QVBoxLayout):
+        """'✂️ MOUSE VIDEO EDITOR' box: editor detect + video + op + text
+        + Edit (kon path cholbe — mouse na ffmpeg — result-e likha thakbe)
+        + edit→upload chain + App Editor section.
+
+        Edits run on a worker thread; the result comes back through
+        _mve_done so only the Qt thread touches widgets.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl(
+            "✂️  MOUSE VIDEO EDITOR — CapCut / Premiere / Clipchamp",
+            10, True, C.PRI))
+        self._mve_status = self._lbl("Editor check korchi…", 8, color=C.TEXT_DIM)
+        form.addWidget(self._mve_status)
+        form.addWidget(self._lbl(
+            "Chhoto kaj (trim/cut/text/thumbnail) = ffmpeg, fast. Boro "
+            "creative kaj = mouse diye editor app-e (CapCut age). Prottek "
+            "click-er pore screen bodleche kina check hoy; kono step fail "
+            "hole sei step-er naam bolei theme jabo. Editor install na "
+            "thakle ffmpeg diye korbo, bole debo.",
+            8, color=C.TEXT_DIM))
+
+        _row = QHBoxLayout(); _row.setSpacing(6)
+        self._mve_video = QLineEdit()
+        self._mve_video.setPlaceholderText("Video-r path — Browse chapo")
+        self._mve_video.setFont(hud_font(10))
+        self._mve_video.setFixedHeight(30)
+        self._mve_video.setStyleSheet(self._fs)
+        _row.addWidget(self._mve_video, 1)
+        _browse = QPushButton("📂  BROWSE")
+        _browse.setFixedHeight(30)
+        _browse.setFont(hud_font(8, QFont.Weight.Bold))
+        _browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        _browse.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+        """)
+        _browse.clicked.connect(self._on_mve_browse)
+        _row.addWidget(_browse)
+        _wrap = QWidget(); _wrap.setLayout(_row)
+        form.addWidget(_wrap)
+
+        form.addWidget(self._lbl("OPERATION", 8, color=C.TEXT_DIM))
+        self._mve_ops = QComboBox()
+        self._mve_ops.addItems([
+            "Trim — prothom 10 s (ffmpeg, fast)",
+            "Cut — majhkhane kete dao (ffmpeg, fast)",
+            "Text lagao (ffmpeg, fast)",
+            "Thumbnail banao (ffmpeg, fast)",
+            "Mouse edit — split + text + export (CapCut, slow)",
+        ])
+        self._mve_ops.setFont(hud_font(9))
+        self._mve_ops.setFixedHeight(30)
+        self._mve_ops.setStyleSheet(
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 8px; }}")
+        form.addWidget(self._mve_ops)
+
+        self._mve_text = QLineEdit()
+        self._mve_text.setPlaceholderText("Text (text op-er jonno) — khali rakhle text lagbe na")
+        self._mve_text.setFont(hud_font(10))
+        self._mve_text.setFixedHeight(30)
+        self._mve_text.setStyleSheet(self._fs)
+        form.addWidget(self._mve_text)
+
+        self._mve_upload = QCheckBox("Export-er pore upload koro (Instagram / Facebook / YouTube)")
+        self._mve_upload.setFont(hud_font(9))
+        form.addWidget(self._mve_upload)
+        self._mve_site = QComboBox()
+        self._mve_site.addItems(["Instagram", "Facebook", "YouTube"])
+        self._mve_site.setFont(hud_font(9))
+        self._mve_site.setFixedHeight(30)
+        self._mve_site.setStyleSheet(
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 8px; }}")
+        form.addWidget(self._mve_site)
+
+        _btns = QHBoxLayout(); _btns.setSpacing(6)
+        self._mve_edit_btn = QPushButton("✂️  EDIT KORO")
+        self._mve_detect_btn = QPushButton("🔍  EDITOR CHECK KORO")
+        for _b in (self._mve_edit_btn, self._mve_detect_btn):
+            _b.setFixedHeight(30)
+            _b.setFont(hud_font(8, QFont.Weight.Bold))
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _b.setStyleSheet(f"""
+                QPushButton {{ background: #00091a; color: {C.PRI};
+                    border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+                QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            """)
+            _btns.addWidget(_b)
+        self._mve_edit_btn.clicked.connect(self._on_mve_edit)
+        self._mve_detect_btn.clicked.connect(self._on_mve_detect)
+        _wrap2 = QWidget(); _wrap2.setLayout(_btns)
+        form.addWidget(_wrap2)
+
+        form.addWidget(self._lbl("🖥️  APP EDITOR — jekono desktop app",
+                                 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Jekono app khule mouse diye chalai: photo (Photos/Paint), "
+            "document (Word/Notepad — kholo, likho, save), jekono UI. "
+            "Prottek click-er pore screen check hoy; fail hole step-er "
+            "naam bolei theme jabo.", 8, color=C.TEXT_DIM))
+        self._mve_app = QLineEdit()
+        self._mve_app.setPlaceholderText("App-er naam (jemon: Notepad, Word, Paint)")
+        self._mve_app.setFont(hud_font(10))
+        self._mve_app.setFixedHeight(30)
+        self._mve_app.setStyleSheet(self._fs)
+        form.addWidget(self._mve_app)
+        self._mve_app_text = QLineEdit()
+        self._mve_app_text.setPlaceholderText("Type korar text (khali thakle sudhu app-ta khulbe)")
+        self._mve_app_text.setFont(hud_font(10))
+        self._mve_app_text.setFixedHeight(30)
+        self._mve_app_text.setStyleSheet(self._fs)
+        form.addWidget(self._mve_app_text)
+        self._mve_app_btn = QPushButton("🖥️  APP KHOLO + CHALAO")
+        self._mve_app_btn.setFixedHeight(30)
+        self._mve_app_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        self._mve_app_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mve_app_btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        self._mve_app_btn.clicked.connect(self._on_mve_app)
+        form.addWidget(self._mve_app_btn)
+
+        self._mve_out = QTextEdit()
+        self._mve_out.setReadOnly(True)
+        self._mve_out.setFont(mono_font(9))
+        self._mve_out.setFixedHeight(120)
+        self._mve_out.setStyleSheet(self._fs.replace("QLineEdit", "QTextEdit"))
+        form.addWidget(self._mve_out)
+        self._on_mve_detect()
+
+    def _on_mve_browse(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Video kholo", "",
+            "Videos (*.mp4 *.mov *.mkv *.avi *.webm)")
+        if path and self._mve_video is not None:
+            self._mve_video.setText(path)
+
+    def _on_mve_detect(self):
+        try:
+            from core import mouse_video_edit as _mve
+            if self._mve_status is not None:
+                self._mve_status.setText(_mve.editor_status_text())
+        except Exception as e:
+            if self._mve_status is not None:
+                self._mve_status.setText(f"Editor check korte parlam na: {e}")
+
+    def _mve_ops_list(self) -> list[str]:
+        idx = self._mve_ops.currentIndex() if self._mve_ops else 0
+        return [["trim"], ["cut"], ["text"], ["thumbnail"],
+                ["split", "text", "export"]][idx]
+
+    def _on_mve_edit(self):
+        video = (self._mve_video.text() or "").strip() if self._mve_video else ""
+        text = (self._mve_text.text() or "").strip() if self._mve_text else ""
+        if not video:
+            if self._mve_out is not None:
+                self._mve_out.setPlainText("Video-r path dao — Browse chapo.")
+            return
+        ops = self._mve_ops_list()
+        do_upload = bool(self._mve_upload.isChecked()) if self._mve_upload else False
+        site = ["instagram", "facebook", "youtube"][
+            self._mve_site.currentIndex()] if self._mve_site else "instagram"
+        if self._mve_edit_btn is not None:
+            self._mve_edit_btn.setEnabled(False)
+        if self._mve_out is not None:
+            self._mve_out.setPlainText("⏳ Edit korchi… (mouse hole slow hobe)")
+
+        def worker():
+            try:
+                from core import mouse_video_edit as _mve
+                if do_upload:
+                    ok, msg = _mve.edit_then_upload(video, ops, site, text=text)
+                else:
+                    ok, msg = _mve.edit_video(video, ops, text=text)
+            except Exception as e:
+                msg = f"Video edit korte parlam na: {e}"
+            self._mve_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="mouse-video-edit").start()
+
+    def _on_mve_app(self):
+        app_name = (self._mve_app.text() or "").strip() if self._mve_app else ""
+        text = (self._mve_app_text.text() or "").strip() if self._mve_app_text else ""
+        if not app_name:
+            if self._mve_out is not None:
+                self._mve_out.setPlainText("App-er naam dao (jemon: Notepad, Word, Paint).")
+            return
+        if self._mve_app_btn is not None:
+            self._mve_app_btn.setEnabled(False)
+        if self._mve_out is not None:
+            self._mve_out.setPlainText(f"⏳ {app_name} khulchi…")
+
+        def worker():
+            try:
+                from core import mouse_video_edit as _mve
+                actions = ([{"label": "Text likhlam", "kind": "type",
+                             "text": text}] if text else [])
+                ok, msg = _mve.app_editor(app_name, actions)
+            except Exception as e:
+                msg = f"App Editor korte parlam na: {e}"
+            self._mve_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="app-editor").start()
+
+    def _on_mve_done(self, msg: str):
+        if self._mve_edit_btn is not None:
+            self._mve_edit_btn.setEnabled(True)
+        if self._mve_app_btn is not None:
+            self._mve_app_btn.setEnabled(True)
+        if self._mve_out is not None:
+            self._mve_out.setPlainText(msg or "Kichu uttor elo na.")
+
+    def _build_advanced_browser_box(self, form: QVBoxLayout):
+        """'🌐 ADVANCED BROWSER CONTROL' box: URL + action + selector +
+        text + Run, with a LIVE step report and login status.
+
+        No-extension driver (Playwright channel="chrome" first, CDP
+        fallback, pyautogui last resort). Every step is verified after it
+        runs; a failed step names itself and stops. Runs on a worker
+        thread; results come back through _ab_done so only the Qt thread
+        touches widgets.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl(
+            "🌐  ADVANCED BROWSER CONTROL — no extension, manusher moto",
+            10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Tomar nijer Chrome-e kholo / click / type / form fill / scroll "
+            "/ video play / upload / multi-tab — prottek step-er pore page "
+            "bodleche kina verify hoy, fail hole step-er naam bolei theme "
+            "jabo. Login: tomar nijer Chrome profile — ami password dekhi "
+            "na, rakhi na.", 8, color=C.TEXT_DIM))
+
+        self._ab_url = QLineEdit()
+        self._ab_url.setPlaceholderText("URL (jemon: https://www.google.com)")
+        self._ab_url.setFont(hud_font(10))
+        self._ab_url.setFixedHeight(30)
+        self._ab_url.setStyleSheet(self._fs)
+        form.addWidget(self._ab_url)
+
+        _row = QHBoxLayout(); _row.setSpacing(6)
+        self._ab_action = QComboBox()
+        self._ab_action.addItems(["click", "type", "fill", "scroll",
+                                  "play video", "press key", "screenshot"])
+        self._ab_action.setFont(hud_font(9))
+        self._ab_action.setFixedHeight(30)
+        self._ab_action.setStyleSheet(
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 8px; }}")
+        _row.addWidget(self._ab_action)
+        self._ab_selector = QLineEdit()
+        self._ab_selector.setPlaceholderText("Selector (jemon: text=Search, input[name=q], video)")
+        self._ab_selector.setFont(hud_font(10))
+        self._ab_selector.setFixedHeight(30)
+        self._ab_selector.setStyleSheet(self._fs)
+        _row.addWidget(self._ab_selector, 1)
+        _wrap = QWidget(); _wrap.setLayout(_row)
+        form.addWidget(_wrap)
+
+        self._ab_text = QLineEdit()
+        self._ab_text.setPlaceholderText("Type / fill korar text (key hole: k, Enter, Escape)")
+        self._ab_text.setFont(hud_font(10))
+        self._ab_text.setFixedHeight(30)
+        self._ab_text.setStyleSheet(self._fs)
+        form.addWidget(self._ab_text)
+
+        _btns = QHBoxLayout(); _btns.setSpacing(6)
+        self._ab_open_btn = QPushButton("🌐  SITE KHOLO")
+        self._ab_run_btn = QPushButton("▶️  ACTION CHALAO")
+        self._ab_login_btn = QPushButton("🔒  LOGIN CHECK")
+        for _b in (self._ab_open_btn, self._ab_run_btn, self._ab_login_btn):
+            _b.setFixedHeight(30)
+            _b.setFont(hud_font(8, QFont.Weight.Bold))
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _b.setStyleSheet(f"""
+                QPushButton {{ background: #00091a; color: {C.PRI};
+                    border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+                QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            """)
+            _btns.addWidget(_b)
+        self._ab_open_btn.clicked.connect(self._on_ab_open)
+        self._ab_run_btn.clicked.connect(self._on_ab_run)
+        self._ab_login_btn.clicked.connect(self._on_ab_login)
+        _wrap2 = QWidget(); _wrap2.setLayout(_btns)
+        form.addWidget(_wrap2)
+
+        self._ab_login_lbl = self._lbl(
+            "Login status: ekhono check kora hoy ni.", 8, color=C.TEXT_DIM)
+        form.addWidget(self._ab_login_lbl)
+
+        self._ab_out = QTextEdit()
+        self._ab_out.setReadOnly(True)
+        self._ab_out.setFont(mono_font(9))
+        self._ab_out.setFixedHeight(140)
+        self._ab_out.setStyleSheet(self._fs.replace("QLineEdit", "QTextEdit"))
+        self._ab_out.setPlainText(
+            "Live step report ekhane dekhabe — prottek step ✅ / ❌ kore.")
+        form.addWidget(self._ab_out)
+
+    def _ab_run_steps(self, steps):
+        for _b in (self._ab_open_btn, self._ab_run_btn, self._ab_login_btn):
+            if _b is not None:
+                _b.setEnabled(False)
+        if self._ab_out is not None:
+            self._ab_out.setPlainText("⏳ Cholche… prottek step live dekhabe.")
+
+        def worker():
+            try:
+                from core import browser_automation as _ba
+                ok, msg = _ba.run_human_actions(
+                    steps, report_fn=lambda m: None)
+            except Exception as e:
+                msg = f"Browser Control korte parlam na: {e}"
+            self._ab_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="advanced-browser").start()
+
+    def _on_ab_open(self):
+        url = (self._ab_url.text() or "").strip() if self._ab_url else ""
+        if not url:
+            if self._ab_out is not None:
+                self._ab_out.setPlainText("URL dao age.")
+            return
+        self._ab_run_steps([{"label": f"Khullam {url}",
+                             "action": "navigate", "url": url}])
+
+    def _on_ab_run(self):
+        action = (self._ab_action.currentText() or "").strip() if self._ab_action else ""
+        selector = (self._ab_selector.text() or "").strip() if self._ab_selector else ""
+        text = (self._ab_text.text() or "").strip() if self._ab_text else ""
+        _map = {"click": "click", "type": "type", "fill": "fill",
+                "scroll": "scroll", "play video": "play",
+                "press key": "key", "screenshot": "screenshot"}
+        step_action = _map.get(action, "click")
+        step = {"label": f"{action} ({selector or text or 'page'})",
+                "action": step_action}
+        if selector:
+            step["selector"] = selector
+        if text:
+            if step_action == "key":
+                step["key"] = text
+            else:
+                step["text"] = text
+        if step_action == "scroll":
+            step["wait_s"] = 1
+        self._ab_run_steps([step])
+
+    def _on_ab_login(self):
+        if self._ab_login_lbl is not None:
+            self._ab_login_lbl.setText("Login status check korchi…")
+        if self._ab_out is not None:
+            self._ab_out.setPlainText("⏳ Login check korchi…")
+
+        def worker():
+            try:
+                from core import browser_driver as _drv
+                from core import browser_automation as _ba
+                driver, _backend, msg = _drv.ensure_driver()
+                if driver is None:
+                    self._ab_done.emit(msg)
+                    return
+                try:
+                    status = _ba.login_status_text(driver)
+                finally:
+                    try:
+                        driver.close()
+                    except Exception:
+                        pass
+                self._ab_done.emit(status)
+            except Exception as e:
+                self._ab_done.emit(f"Login check korte parlam na: {e}")
+
+        threading.Thread(target=worker, daemon=True,
+                         name="advanced-browser-login").start()
+
+    def _on_ab_done(self, msg: str):
+        for _b in (self._ab_open_btn, self._ab_run_btn, self._ab_login_btn):
+            if _b is not None:
+                _b.setEnabled(True)
+        if self._ab_out is not None:
+            self._ab_out.setPlainText(msg or "Kichu uttor elo na.")
+        if self._ab_login_lbl is not None and msg:
+            first = (msg or "").splitlines()[0] if msg else ""
+            if "login" in first.lower():
+                self._ab_login_lbl.setText(first)
 
     def _build_video_edit_box(self, form: QVBoxLayout):
         """'🎬 VIDEO EDITOR' — open a video, set in/out by clicking, Cut/Export.
@@ -6028,6 +7203,13 @@ class MainAgentOverlay(QWidget):
             f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 8px;")
         self._phone_img.setMinimumHeight(120)
         lay.addWidget(self._phone_img)
+        # Real measured fps — never a claimed number. Agora primary is
+        # real video; the frame stream shows its true rate here.
+        self._live_fps_lbl = _txt(8, C.TEXT_DIM)
+        self._live_fps_lbl.setText(
+            "📹 Live fps: — (Agora primary — real video; frame stream fallback "
+            "adaptive 10–20 fps, asol number ekhane dekhabe)")
+        lay.addWidget(self._live_fps_lbl)
         row = QHBoxLayout()
         b = QPushButton("🔄  Refresh phone screen")
         b.setFont(hud_font(8))
@@ -6043,6 +7225,16 @@ class MainAgentOverlay(QWidget):
             f"border-radius: 8px; padding: 5px;")
         self._live_btn.clicked.connect(self._on_toggle_live)
         row.addWidget(self._live_btn)
+        b = QPushButton("⛶  Full screen (Agora)")
+        b.setFont(hud_font(8, QFont.Weight.Bold))
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; border: 1px solid {C.PRI_DIM}; "
+            f"border-radius: 8px; padding: 5px;")
+        b.setToolTip("Phone-er FULL screen, real live video (Agora) — Chrome-e khulbe. "
+                     "Agora na hole frame stream cholbe.")
+        b.clicked.connect(self._on_fullscreen_live)
+        row.addWidget(b)
         row.addStretch()
         lay.addLayout(row)
 
@@ -6066,16 +7258,41 @@ class MainAgentOverlay(QWidget):
         row.addStretch()
         lay.addLayout(row)
 
-        # (5) Location
+        # (5) Location — map + last-known fix + history (last 50).
         _section("📍  LOCATION — phone kothay")
         self._loc_lbl = _txt(9)
         lay.addWidget(self._loc_lbl)
+        self._map_img = QLabel("Map ekhono nei — location asle ekhane dekhabe.")
+        self._map_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._map_img.setFont(hud_font(8))
+        self._map_img.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: {C.PANEL2}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 8px; padding: 8px;")
+        self._map_img.setMinimumHeight(100)
+        lay.addWidget(self._map_img)
+        self._map_fix_at = ""
         row = QHBoxLayout()
         b = QPushButton("📍  Find phone")
         b.setFont(hud_font(8))
         b.setStyleSheet(
             f"color: {C.PRI}; background: {C.PANEL2}; border-radius: 8px; padding: 5px;")
         b.clicked.connect(self._on_find_phone)
+        row.addWidget(b)
+        row.addStretch()
+        lay.addLayout(row)
+
+        # (7) Automatic Tasks — queue / running / done / failed + ke
+        # chalalo (phone / pc / backend). PC off thakle PC-r task cholbe
+        # na — panel-ei likha thake; phone-er task phone-e chole.
+        _section("📋  AUTOMATIC TASKS — ke chalalo (phone / pc)")
+        self._tasks_lbl = _txt(8, C.TEXT_DIM)
+        lay.addWidget(self._tasks_lbl)
+        row = QHBoxLayout()
+        b = QPushButton("🔄  Refresh tasks")
+        b.setFont(hud_font(8))
+        b.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; border-radius: 8px; padding: 5px;")
+        b.clicked.connect(self._on_refresh_tasks)
         row.addWidget(b)
         row.addStretch()
         lay.addLayout(row)
@@ -6183,6 +7400,43 @@ class MainAgentOverlay(QWidget):
         except Exception as e:
             self._status_lbl.setText(f"Live screen shuru korte parlam na: {e}")
 
+    def _on_fullscreen_live(self) -> None:
+        """⛶ Full screen — Agora LIVE video as the PRIMARY path (real
+        video, phone-er full screen, Chrome-e khulbe). Agora na hole
+        frame stream-e fire ashe — status-e ja hoy tai lekha thake.
+        Runs on a worker thread; never raises."""
+        self._status_lbl.setText("📹 Agora live khulchi — phone-ke bolchi…")
+
+        def _work():
+            try:
+                from core import agora_viewer as _av
+                res = _av.start_agora_live()
+                if res.get("ok"):
+                    msg = ("📹 Agora LIVE khullam — phone-er FULL screen, "
+                           "real video (Chrome). "
+                           f"Channel: {res.get('channel', '')}.")
+                else:
+                    msg = (f"📹 Agora holo na: {res.get('reason', '')} "
+                           "Frame stream-e '▶ LIVE screen' chapo.")
+                self._worker_done.emit("fullscreen_live", msg[:300])
+            except Exception as e:
+                self._worker_done.emit(
+                    "fullscreen_live",
+                    f"Agora live khulte parlam na: {e}")
+
+        threading.Thread(target=_work, daemon=True,
+                         name="main-agent-fullscreen-live").start()
+
+    def _on_refresh_tasks(self) -> None:
+        """Refresh the Automatic Tasks panel now (also refreshes every
+        4 ticks). Never raises."""
+        try:
+            from core import auto_tasks as _at
+            self._tasks_lbl.setText(_at.tasks_panel_text())
+            self._status_lbl.setText("📋 Tasks refresh korlam.")
+        except Exception as e:
+            self._status_lbl.setText(f"Tasks dekhte parlam na: {e}")
+
     def _on_live_frame(self, data: bytes) -> None:
         """One live JPEG frame (Qt thread via _live_frame). Never raises."""
         try:
@@ -6192,6 +7446,16 @@ class MainAgentOverlay(QWidget):
             self._phone_img.setPixmap(px.scaled(
                 460, 300, Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation))
+            # Real measured fps — the streamer's own count, never a claim.
+            try:
+                st = self._live_streamer
+                fps = st.measured_fps if st is not None else 0.0
+                self._live_fps_lbl.setText(
+                    f"📹 Live fps (asol, mapa): {fps:.1f} fps — frame stream "
+                    f"adaptive 10–20 fps (phone jotota pathay tototai). "
+                    f"Agora video hole Chrome-e fps dekhabe.")
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -6391,7 +7655,7 @@ class MainAgentOverlay(QWidget):
             self._guest_lbl.setText("👤 Guest mode ON" if _gm() else "")
         except Exception:
             pass
-        # (5) Location — last-known fix (never faked)
+        # (5) Location — last-known fix (never faked) + map (last 50).
         try:
             from core.phone_location import last_fix
             fix = last_fix()
@@ -6400,12 +7664,43 @@ class MainAgentOverlay(QWidget):
                     f"📍 Lat {fix.get('lat')}, Lng {fix.get('lon')} "
                     f"({fix.get('at') or ''})  •  "
                     f"🗺️ google.com/maps?q={fix.get('lat')},{fix.get('lon')}")
+                # Map: refresh only when a NEW fix arrived (tiles need
+                # internet; a stale download is never retried every tick).
+                if str(fix.get("at") or "") != self._map_fix_at:
+                    self._map_fix_at = str(fix.get("at") or "")
+                    try:
+                        from core import location_map as _lm
+                        path = _lm.map_image_path(
+                            float(fix.get("lat")), float(fix.get("lon")))
+                        if path:
+                            px = QPixmap(path)
+                            if not px.isNull():
+                                self._map_img.setPixmap(px.scaled(
+                                    460, 200,
+                                    Qt.AspectRatioMode.KeepAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation))
+                            else:
+                                self._map_img.setText(
+                                    "Map image porte parlam na.")
+                        else:
+                            self._map_img.setText(
+                                "Map ante parlam na — internet lagbe "
+                                "(OpenStreetMap tiles).")
+                    except Exception as e:
+                        self._map_img.setText(f"Map ante parlam na: {e}")
             else:
                 self._loc_lbl.setText(
                     "📍 Phone-er location jani na ekhono — 'Find phone' chapo; "
                     "phone GPS + Location permission ON thakte hobe.")
         except Exception:
             pass
+        # (7) Automatic Tasks — refreshed every 4 ticks (config reads).
+        if self._tick_count % 4 == 0:
+            try:
+                from core import auto_tasks as _at
+                self._tasks_lbl.setText(_at.tasks_panel_text())
+            except Exception:
+                pass
         # (3)+(4) Screens re-poll every 4 s (tick is 1 s). While the live
         # stream is running, the phone stills are skipped — the streamer
         # drives the pixmap directly; the PC stills keep refreshing.

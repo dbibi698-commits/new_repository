@@ -121,6 +121,23 @@ def set_settings(rate=None, pitch=None, voice=None, auto_reply_voice=None,
         return dict(_DEFAULTS)
 
 
+def effective_settings(store=None) -> dict:
+    """Voice settings WITH the current mood's tone applied (rate x
+    mode-rate, pitch x mode-pitch, clamped). The local TTS fallback
+    speaks in the mood's tone — Girlfriend warmer, Comedy brighter,
+    Boss steadier. Never raises."""
+    try:
+        s = get_settings(store)
+        from core import mood as _mood
+        mr, mp = _mood.mode_tone()
+        return {"rate": _clamp_rate(s["rate"] * mr),
+                "pitch": _clamp_pitch(s["pitch"] * mp),
+                "voice": s["voice"],
+                "auto_reply_voice": s["auto_reply_voice"]}
+    except Exception:
+        return get_settings(store)
+
+
 def auto_reply_voice_on(store=None) -> bool:
     """True when the phone should get spoken (voice) replies. Never raises."""
     try:
@@ -151,9 +168,10 @@ def pitch_as_espeak(pitch: float = 1.0) -> int:
 
 def tts_cfg_overrides(store=None) -> dict:
     """{"rate": SAPI int, "voice": str, "speed": float} for provider cfgs.
-    Providers merge this UNDER their own explicit cfg values. Never raises."""
+    Providers merge this UNDER their own explicit cfg values. Uses the
+    EFFECTIVE settings (mood tone applied). Never raises."""
     try:
-        s = get_settings(store)
+        s = effective_settings(store)
         return {"rate": rate_as_sapi(s["rate"]), "voice": s["voice"],
                 "speed": s["rate"], "pitch": s["pitch"]}
     except Exception:

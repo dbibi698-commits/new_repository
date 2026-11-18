@@ -16,12 +16,13 @@ Two modes, best first:
     regardless of the phone version.
 
 Honest limit: a fast frame stream is NOT true video — it is JPEG frames
-as fast as the phone can push them (~5-10 fps on a good connection).
-When the phone only sends stills, the viewer says so plainly ("stills
-mode") instead of pretending the picture is live.
+as fast as the phone can push them (adaptive 10–20 fps poll; the viewer
+shows the real measured fps, never a claimed number). When the phone
+only sends stills, the viewer says so plainly ("stills mode") instead
+of pretending the picture is live.
 
-ADAPTIVE FPS (advanced round): the poll loop starts at 12 fps and adapts
-between 6 and 15 fps — frames arriving fast speed the poll up, stale polls
+ADAPTIVE FPS (agents round): the poll loop starts at 15 fps and adapts
+between 10 and 20 fps — frames arriving fast speed the poll up, stale polls
 slow it down. measured_fps is the real frame rate over the last 2 seconds
 (frames the viewer actually showed, never a claimed number).
 
@@ -33,15 +34,15 @@ import base64
 import threading
 import time
 
-_POLL_INTERVAL = 1.0 / 12.0    # start at 12 fps, adapt 6–15 fps
-_FPS_MIN, _FPS_MAX = 6.0, 15.0
+_POLL_INTERVAL = 1.0 / 15.0    # start at 15 fps, adapt 10–20 fps
+_FPS_MIN, _FPS_MAX = 10.0, 20.0
 _STALE_AFTER_S = 2.0            # no new frame for this long -> ask for a fresh shot
 _STREAM_PATH = "/api/phone/screen-stream"
 
 
 def adapt_interval(current: float, got_new: bool) -> float:
     """Next poll interval after one poll: a fresh frame speeds the poll
-    up (toward 15 fps), a stale poll slows it down (toward 6 fps).
+    up (toward 20 fps), a stale poll slows it down (toward 10 fps).
     Pure — the adaptive-fps rule, tested directly. Never raises."""
     try:
         cur = max(1.0 / _FPS_MAX, min(1.0 / _FPS_MIN, float(current or 0)))
@@ -49,7 +50,7 @@ def adapt_interval(current: float, got_new: bool) -> float:
             return max(1.0 / _FPS_MAX, cur * 0.9)
         return min(1.0 / _FPS_MIN, cur * 1.15)
     except Exception:
-        return 1.0 / 12.0
+        return 1.0 / 15.0
 
 
 class LiveScreenStreamer:
@@ -62,10 +63,10 @@ class LiveScreenStreamer:
     must route through a pyqtSignal.
     """
 
-    def __init__(self, link=None, fps: float = 12.0,
+    def __init__(self, link=None, fps: float = 15.0,
                  on_frame=None, on_status=None):
         self._link = link
-        self._fps = max(1.0, min(float(fps or 12.0), 15.0))
+        self._fps = max(1.0, min(float(fps or 15.0), 20.0))
         self._on_frame = on_frame
         self._on_status = on_status
         self._stop = threading.Event()
@@ -220,7 +221,7 @@ class LiveScreenStreamer:
                             pass
                         self._last_new_at = time.monotonic()
                 # Adaptive fps: fresh frames speed the poll up (toward
-                # 15 fps), stale polls slow it down (toward 6 fps).
+                # 20 fps), stale polls slow it down (toward 10 fps).
                 self._interval = adapt_interval(self._interval, got_new)
                 time.sleep(self._interval)
         except Exception as e:
@@ -267,7 +268,7 @@ def live_status(link=None) -> str:
                     + (f" (frame {at})" if at else "")
                     + (f" — {size // 1024} KB" if size else "")
                     + ". Live stream chalu korle master screen-e frame asbe "
-                      "(adaptive 6–15 fps poll); nahole 4 s-e stills "
+                      "(adaptive 10–20 fps poll); nahole 4 s-e stills "
                       "refresh hobe.")
         return ("📱 Phone pair kora ache, kintu backend-e kono screen frame "
                 "pelam na — phone-e Jarvis khola ache kina dekho, tarpor "

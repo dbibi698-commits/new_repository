@@ -282,6 +282,15 @@ class JarvisUI:
         """Thread-safe: display content in the panel below the HUD."""
         self._win._content_sig.emit(title[:48], text[:4000])
 
+    def set_live_reply(self, text: str):
+        """Thread-safe: stream the reply text into the live-reply line
+        under the assistant name (instant ack + Gemini streaming). Empty
+        text hides the line."""
+        try:
+            self._win._live_reply_sig.emit(str(text or "")[:4000])
+        except Exception:
+            pass
+
     def show_jarvis_link(self) -> None:
         """Thread-safe: open the 📱 JARVIS LINK pairing QR overlay."""
         self._win._jarvis_link_sig.emit()

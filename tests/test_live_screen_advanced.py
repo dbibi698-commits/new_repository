@@ -1,5 +1,5 @@
 """tests/test_live_screen_advanced.py — 📺 LIVE SCREEN smoother: adaptive
-poll interval (6–15 fps) + real measured fps.
+poll interval (10–20 fps) + real measured fps.
 
 Run from ~/workspace/mark-lvii:
     python3 -m unittest discover -s tests -v
@@ -20,32 +20,32 @@ from core import live_screen as ls  # noqa: E402
 
 class TestAdaptInterval(unittest.TestCase):
     def test_fresh_frame_speeds_up(self):
-        self.assertLess(ls.adapt_interval(1.0 / 12.0, True), 1.0 / 12.0)
+        self.assertLess(ls.adapt_interval(1.0 / 15.0, True), 1.0 / 12.0)
 
     def test_stale_poll_slows_down(self):
-        self.assertGreater(ls.adapt_interval(1.0 / 12.0, False), 1.0 / 12.0)
+        self.assertGreater(ls.adapt_interval(1.0 / 15.0, False), 1.0 / 15.0)
 
-    def test_never_faster_than_15fps(self):
-        cur = 1.0 / 12.0
+    def test_never_faster_than_20fps(self):
+        cur = 1.0 / 15.0
         for _ in range(50):
             cur = ls.adapt_interval(cur, True)
-        self.assertGreaterEqual(cur, 1.0 / 15.0 - 1e-9)
+        self.assertGreaterEqual(cur, 1.0 / 20.0 - 1e-9)
 
-    def test_never_slower_than_6fps(self):
-        cur = 1.0 / 12.0
+    def test_never_slower_than_10fps(self):
+        cur = 1.0 / 15.0
         for _ in range(50):
             cur = ls.adapt_interval(cur, False)
-        self.assertLessEqual(cur, 1.0 / 6.0 + 1e-9)
+        self.assertLessEqual(cur, 1.0 / 10.0 + 1e-9)
 
-    def test_starts_at_12fps(self):
-        self.assertAlmostEqual(ls._POLL_INTERVAL, 1.0 / 12.0)
+    def test_starts_at_15fps(self):
+        self.assertAlmostEqual(ls._POLL_INTERVAL, 1.0 / 15.0)
 
 
 class TestMeasuredFps(unittest.TestCase):
-    def test_default_fps_is_12(self):
+    def test_default_fps_is_15(self):
         streamer = ls.LiveScreenStreamer(link=None)
-        self.assertEqual(streamer._fps, 12.0)
-        self.assertAlmostEqual(streamer._interval, 1.0 / 12.0)
+        self.assertEqual(streamer._fps, 15.0)
+        self.assertAlmostEqual(streamer._interval, 1.0 / 15.0)
 
     def test_measured_fps_from_recorded_frames(self):
         streamer = ls.LiveScreenStreamer(link=None)
@@ -71,8 +71,8 @@ class TestMeasuredFps(unittest.TestCase):
         text = ls.live_status()
         self.assertTrue(text.strip())
         self.assertIn("pair", text.lower())
-        self.assertEqual(ls._FPS_MIN, 6.0)
-        self.assertEqual(ls._FPS_MAX, 15.0)
+        self.assertEqual(ls._FPS_MIN, 10.0)
+        self.assertEqual(ls._FPS_MAX, 20.0)
 
 
 if __name__ == "__main__":

@@ -975,6 +975,79 @@ def _compile_check(folder: str) -> tuple[bool, str]:
         return False, f"main.py compile holo na: {e}"
 
 
+def _watch_runtime(folder: str, server_id: str, port: int,
+                   ask_fn=None, max_attempts: int = _MAX_FIX_ATTEMPTS,
+                   wait_s: int = 8) -> dict:
+    """RUNTIME auto-fix: a web server that STARTED fine can still crash
+    on its first real request (import error in a route, bad config...).
+    Watch it for `wait_s` seconds; if it dies with a traceback in
+    server.log, patch main.py (Gemini, when ask_fn is given) and restart
+    — max 3 runtime attempts. Returns {runtime_attempts, runtime_error,
+    runtime_fixed}. Never raises."""
+    try:
+        root = Path(str(folder or "").strip()).expanduser()
+        log_path = root / "server.log"
+        attempts = 0
+        last_error = ""
+        while attempts < max(1, int(max_attempts or 3)):
+            time.sleep(max(2, int(wait_s or 8)))
+            if _port_open(int(port or 0)):
+                return {"runtime_attempts": attempts, "runtime_error": "",
+                        "runtime_fixed": attempts > 0}
+            # Port is down — did it crash with a traceback?
+            tail = ""
+            try:
+                tail = log_path.read_text(encoding="utf-8",
+                                          errors="replace")[-1500:]
+            except Exception:
+                pass
+            if "Traceback" not in tail and "Error" not in tail:
+                return {"runtime_attempts": attempts,
+                        "runtime_error": "Server thamlo — log-e kono "
+                        "traceback pelam na.",
+                        "runtime_fixed": False}
+            last_error = tail
+            attempts += 1
+            if attempts >= max(1, int(max_attempts or 3)):
+                break
+            fixed = False
+            if ask_fn is not None:
+                try:
+                    prompt = ("This Python web server STARTED but crashed "
+                              "at runtime. Here is the log:\n"
+                              + tail[:1500] + "\nReply ONLY JSON like "
+                              "{\"files\": {\"main.py\": \"...\"}} with the "
+                              "FIXED full main.py (keep the PORT env var).")
+                    raw = ask_fn(prompt)
+                    data = json.loads(raw) if isinstance(raw, str) else raw
+                    files = (data or {}).get("files") \
+                        if isinstance(data, dict) else None
+                    if isinstance(files, dict) and files.get("main.py"):
+                        (root / "main.py").write_text(
+                            str(files["main.py"]), encoding="utf-8")
+                        fixed = True
+                except Exception:
+                    fixed = False
+            if not fixed:
+                break
+            res = restart_server(server_id)
+            if "🔄" not in str(res):
+                last_error = str(res)
+                break
+        if _port_open(int(port or 0)):
+            return {"runtime_attempts": attempts, "runtime_error": "",
+                    "runtime_fixed": attempts > 0}
+        return {"runtime_attempts": attempts,
+                "runtime_error": (f"{attempts} bar runtime fix korlam — "
+                                  f"server abar thamlo. Log-er shesh:\n"
+                                  f"{last_error[-500:]}"),
+                "runtime_fixed": False}
+    except Exception as e:
+        return {"runtime_attempts": 0,
+                "runtime_error": f"Runtime watch korte parlam na: {e}",
+                "runtime_fixed": False}
+
+
 # ── build → test → run → fix (max 3) ─────────────────────────────────────────
 
 def build_and_run(spec: str, kind: str = "", template: str = "",
@@ -1048,6 +1121,14 @@ def build_and_run(spec: str, kind: str = "", template: str = "",
             out["port"] = res.get("port")
             out["server_id"] = res.get("server_id")
             out["port_note"] = res.get("port_note", "")
+            # RUNTIME auto-fix: the server started, but does it STAY up?
+            # Watch it; on a crash, patch + restart (max 3).
+            watch = _watch_runtime(folder, res.get("server_id", ""),
+                                   res.get("port", 0), ask_fn=ask_fn)
+            out["runtime_attempts"] = watch.get("runtime_attempts", 0)
+            out["runtime_fixed"] = watch.get("runtime_fixed", False)
+            if watch.get("runtime_error"):
+                out["runtime_error"] = watch["runtime_error"]
             if open_browser:
                 out["browser"] = open_in_browser(url)
         elif kind == "tool":
@@ -1059,6 +1140,15 @@ def build_and_run(spec: str, kind: str = "", template: str = "",
         if deploy:
             out["deploy_link"], out["deploy_note"] = deploy_project(
                 folder, slugify(spec), repo=repo)
+        # AUTO-PUSH: build + test shesh hole GitHub-e push koro (Settings
+        # toggle auto_push_enabled ON thakle). Repo URL report kori.
+        try:
+            from core import auto_push as _ap
+            if _ap.auto_push_enabled():
+                out["push_result"] = _ap.auto_push_project(
+                    folder, repo_name=slugify(spec))
+        except Exception:
+            pass
         return out
     except Exception as e:
         return {"ok": False, "attempts": 0, "error": f"Build korte parlam na: {e}"}
@@ -1096,6 +1186,13 @@ def build_and_run_text(spec: str, kind: str = "", template: str = "",
             lines.append("📦 " + str(res["requirements_note"]))
         if res.get("attempts", 1) > 1:
             lines.append(f"🔧 {res['attempts']} attempt-e thik holo.")
+        if res.get("runtime_fixed"):
+            lines.append(f"🔧 Runtime crash-o thik korlam "
+                         f"({res.get('runtime_attempts', 1)} attempt).")
+        if res.get("runtime_error"):
+            lines.append(f"⚠️ Runtime note: {res['runtime_error'][:300]}")
+        if res.get("push_result"):
+            lines.append(str(res["push_result"])[:300])
         if res.get("browser"):
             lines.append(str(res["browser"]))
         if res.get("deploy_link"):

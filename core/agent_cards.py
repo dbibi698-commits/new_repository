@@ -1,4 +1,4 @@
-"""core/agent_cards.py — 🤖 AGENT CARDS: ONE Main Agent + 31 workers.
+"""core/agent_cards.py — 🤖 AGENT CARDS: ONE Main Agent + 86 workers.
 
 The user asked for 20-30 agent cards on the master screen / Plugin
 Settings: one MAIN agent (the orchestrator who talks to the user and
@@ -7,7 +7,16 @@ deploy, browser control, Firebase connect, hosting auto-fix, WhatsApp,
 live screen, mouse, video editing, GitHub, file transfer, phone, location,
 memory, mood, music, screenshot, battery, voice notes, calculator,
 translator, weather, news, Python Run, Software Builder, Photo Editor,
-Data Analyzer, Report Writer, Email Sender, File Organizer.
+Data Analyzer, Report Writer, Email Sender, File Organizer — and 50
+utility workers (Timer, Stopwatch, Pomodoro, World Clock, Sleep Timer,
+Focus Mode, Unit/Currency Converter, Code Formatter, JSON Viewer, Regex
+Tester, File Search, Zip, Storage Analyzer, Disk Cleanup, Download
+Manager, Image Resizer, Clipboard, System Info, Process/Startup Manager,
+Network Speed, WiFi, Bluetooth, VPN, Battery Monitor, Screen Recorder,
+QR/Password Generator, Meme/Subtitle/Invoice/Resume, Notes, Habits,
+Expenses, Bookmarks, Contacts, Calendar, Flashcards, Quiz, Poll,
+Dictionary, Audio Converter, Video Downloader, YouTube, SMS, Call Log,
+Step Counter, Password Vault).
 
 Every card maps to a REAL tool (its "tool" value is a real tool/plugin/
 action name in this codebase — tests/test_agent_cards_update.py re-derives
@@ -24,7 +33,7 @@ so importing this module can never create a cycle.
 """
 from __future__ import annotations
 
-# ── the 32 cards ─────────────────────────────────────────────────────────────
+# ── the 87 cards ─────────────────────────────────────────────────────────────
 # id: stable, lowercase — used in config, the dashboard JSON and the UI.
 # tool: the REAL tool/plugin/action name that does this card's job.
 # action: the key in _ACTIONS below. needs: what the card needs to run
@@ -222,6 +231,323 @@ CARD_DEFS = [
         "tool": "file_organizer", "action": "file_organizer_status",
         "needs": "",
     },
+    # ── 50 NEW utility cards (agents round) ──────────────────────────────
+    # Each maps to a REAL plugin tool (utility_* / youtube_play) and its
+    # action calls a REAL core/utility_tools (or youtube_agent) function.
+    # No placeholder cards: a card whose job needs input says so plainly
+    # on Run instead of faking it.
+    {
+        "id": "timer", "name": "Timer", "icon": "⏱️",
+        "job": "Countdown timer — minute diye chalao.",
+        "tool": "utility_time", "action": "timer_status", "needs": "",
+    },
+    {
+        "id": "stopwatch", "name": "Stopwatch", "icon": "⏱️",
+        "job": "Stopwatch — start / stop / lap.",
+        "tool": "utility_time", "action": "stopwatch_status", "needs": "",
+    },
+    {
+        "id": "pomodoro", "name": "Pomodoro", "icon": "🍅",
+        "job": "25 min kaj + 5 min break cycle.",
+        "tool": "utility_time", "action": "pomodoro_status", "needs": "",
+    },
+    {
+        "id": "world_clock", "name": "World Clock", "icon": "🌍",
+        "job": "Duniar shohorer somoy ek sathe.",
+        "tool": "utility_time", "action": "world_clock_status", "needs": "",
+    },
+    {
+        "id": "sleep_timer", "name": "Sleep Timer", "icon": "😴",
+        "job": "Nirdisto somoy pore PC ghumabe.",
+        "tool": "utility_time", "action": "sleep_timer_status", "needs": "",
+    },
+    {
+        "id": "focus_mode", "name": "Focus Mode", "icon": "🎯",
+        "job": "Notification bondho + focus timer.",
+        "tool": "utility_time", "action": "focus_mode_status", "needs": "",
+    },
+    {
+        "id": "unit_converter", "name": "Unit Converter", "icon": "🔁",
+        "job": "Length / weight / volume / temperature convert.",
+        "tool": "utility_convert", "action": "unit_convert_sample",
+        "needs": "",
+    },
+    {
+        "id": "currency_converter", "name": "Currency Converter",
+        "icon": "💱",
+        "job": "Live rate-e currency convert (free API).",
+        "tool": "utility_convert", "action": "currency_convert_sample",
+        "needs": "Internet (live rate-er jonno)",
+    },
+    {
+        "id": "code_formatter", "name": "Code Formatter", "icon": "🧹",
+        "job": "Python / JSON code format kora.",
+        "tool": "utility_convert", "action": "code_format_sample",
+        "needs": "",
+    },
+    {
+        "id": "json_viewer", "name": "JSON Viewer", "icon": "📋",
+        "job": "JSON check + sundor kore dekhano.",
+        "tool": "utility_convert", "action": "json_view_sample", "needs": "",
+    },
+    {
+        "id": "regex_tester", "name": "Regex Tester", "icon": "🔍",
+        "job": "Regex pattern test kora — match gulo dekhay.",
+        "tool": "utility_convert", "action": "regex_test_sample",
+        "needs": "",
+    },
+    {
+        "id": "file_search", "name": "File Search", "icon": "🔍",
+        "job": "Naam diye file khujo PC-te.",
+        "tool": "utility_files", "action": "file_search_sample", "needs": "",
+    },
+    {
+        "id": "zip_tool", "name": "Zip Tool", "icon": "📦",
+        "job": "Zip banao / zip kholo.",
+        "tool": "utility_files", "action": "zip_tool_status", "needs": "",
+    },
+    {
+        "id": "storage_analyzer", "name": "Storage Analyzer", "icon": "💽",
+        "job": "Disk use + boro folder gulo dekhay.",
+        "tool": "utility_files", "action": "storage_analyzer_run",
+        "needs": "",
+    },
+    {
+        "id": "disk_cleanup", "name": "Disk Cleanup", "icon": "🧹",
+        "job": "Purono temp file — preview age, Recycle Bin-e pathay.",
+        "tool": "utility_files", "action": "disk_cleanup_preview",
+        "needs": "",
+    },
+    {
+        "id": "download_manager", "name": "Download Manager", "icon": "⬇️",
+        "job": "URL theke file download (100 MB cap).",
+        "tool": "utility_files", "action": "download_manager_status",
+        "needs": "Internet",
+    },
+    {
+        "id": "image_resizer", "name": "Image Resizer", "icon": "🖼️",
+        "job": "Image resize kora (PIL).",
+        "tool": "utility_files", "action": "image_resizer_status",
+        "needs": "",
+    },
+    {
+        "id": "clipboard", "name": "Clipboard", "icon": "📋",
+        "job": "PC clipboard dekha / bosano.",
+        "tool": "utility_files", "action": "clipboard_get", "needs": "",
+    },
+    {
+        "id": "system_info", "name": "System Info", "icon": "🖥️",
+        "job": "OS / CPU / RAM / disk / battery.",
+        "tool": "utility_system", "action": "system_info_run", "needs": "",
+    },
+    {
+        "id": "process_manager", "name": "Process Manager", "icon": "⚙️",
+        "job": "Top process gulo + PID diye bondho kora.",
+        "tool": "utility_system", "action": "process_list_run", "needs": "",
+    },
+    {
+        "id": "startup_manager", "name": "Startup Manager", "icon": "🚀",
+        "job": "Windows-er sathe ki ki chalu hoy — list.",
+        "tool": "utility_system", "action": "startup_list_run", "needs": "",
+    },
+    {
+        "id": "network_speed", "name": "Network Speed Test", "icon": "📶",
+        "job": "Download speed mapa (1 MB probe).",
+        "tool": "utility_system", "action": "network_speed_run",
+        "needs": "Internet",
+    },
+    {
+        "id": "wifi_networks", "name": "WiFi Networks", "icon": "📶",
+        "job": "Kacher WiFi network-er list.",
+        "tool": "utility_system", "action": "wifi_networks_run", "needs": "",
+    },
+    {
+        "id": "bluetooth_devices", "name": "Bluetooth Devices", "icon": "🔵",
+        "job": "Bluetooth device-er list.",
+        "tool": "utility_system", "action": "bluetooth_devices_run",
+        "needs": "",
+    },
+    {
+        "id": "vpn_status", "name": "VPN Status", "icon": "🔒",
+        "job": "VPN adapter connect ache kina.",
+        "tool": "utility_system", "action": "vpn_status_run", "needs": "",
+    },
+    {
+        "id": "battery_monitor", "name": "Battery Monitor", "icon": "🔋",
+        "job": "PC + phone battery ek sathe.",
+        "tool": "utility_system", "action": "battery_monitor_run",
+        "needs": "",
+    },
+    {
+        "id": "screen_recorder", "name": "Screen Recorder", "icon": "🎥",
+        "job": "PC screen record (ffmpeg) — start/stop.",
+        "tool": "utility_system", "action": "screen_recorder_status",
+        "needs": "ffmpeg",
+    },
+    {
+        "id": "qr_generator", "name": "QR Generator", "icon": "🔳",
+        "job": "Text/URL-er QR code PNG banano.",
+        "tool": "utility_create", "action": "qr_generator_sample",
+        "needs": "",
+    },
+    {
+        "id": "password_generator", "name": "Password Generator",
+        "icon": "🔑",
+        "job": "Strong random password banano.",
+        "tool": "utility_create", "action": "password_generator_run",
+        "needs": "",
+    },
+    {
+        "id": "meme_maker", "name": "Meme Maker", "icon": "😂",
+        "job": "Image-te upore-niche text diye meme.",
+        "tool": "utility_create", "action": "meme_maker_status", "needs": "",
+    },
+    {
+        "id": "subtitle_maker", "name": "Subtitle Maker", "icon": "💬",
+        "job": "Text theke .srt subtitle file.",
+        "tool": "utility_create", "action": "subtitle_maker_status",
+        "needs": "",
+    },
+    {
+        "id": "invoice_maker", "name": "Invoice Maker", "icon": "🧾",
+        "job": "Excel invoice banano.",
+        "tool": "utility_create", "action": "invoice_maker_status",
+        "needs": "",
+    },
+    {
+        "id": "resume_builder", "name": "Resume Builder", "icon": "📄",
+        "job": "DOCX resume banano.",
+        "tool": "utility_create", "action": "resume_builder_status",
+        "needs": "",
+    },
+    {
+        "id": "notes", "name": "Notes", "icon": "📝",
+        "job": "Choto note likhe rakha + dekhano.",
+        "tool": "utility_life", "action": "notes_list", "needs": "",
+    },
+    {
+        "id": "habit_tracker", "name": "Habit Tracker", "icon": "✅",
+        "job": "Protidin-er habit + streak.",
+        "tool": "utility_life", "action": "habit_status_run", "needs": "",
+    },
+    {
+        "id": "expense_tracker", "name": "Expense Tracker", "icon": "💰",
+        "job": "Kharcha likhe rakha + masher hisab.",
+        "tool": "utility_life", "action": "expense_summary_run", "needs": "",
+    },
+    {
+        "id": "bookmark_manager", "name": "Bookmark Manager", "icon": "🔖",
+        "job": "URL bookmark save + list.",
+        "tool": "utility_life", "action": "bookmark_list_run", "needs": "",
+    },
+    {
+        "id": "contacts", "name": "Contacts", "icon": "👤",
+        "job": "Contact save + khujo.",
+        "tool": "utility_life", "action": "contacts_list", "needs": "",
+    },
+    {
+        "id": "calendar", "name": "Calendar", "icon": "📅",
+        "job": "Aajker + agami event-er list.",
+        "tool": "utility_life", "action": "calendar_today_run", "needs": "",
+    },
+    {
+        "id": "flashcard_maker", "name": "Flashcard Maker", "icon": "🃏",
+        "job": "Flashcard banao + quiz.",
+        "tool": "utility_life", "action": "flashcard_quiz_run", "needs": "",
+    },
+    {
+        "id": "quiz_maker", "name": "Quiz Maker", "icon": "❓",
+        "job": "Choto quiz banao (general knowledge).",
+        "tool": "utility_life", "action": "quiz_make_run", "needs": "",
+    },
+    {
+        "id": "poll_maker", "name": "Poll Maker", "icon": "📊",
+        "job": "Poll banao + vote.",
+        "tool": "utility_life", "action": "poll_status_run", "needs": "",
+    },
+    {
+        "id": "dictionary", "name": "Dictionary", "icon": "📖",
+        "job": "English shobder mane (free API).",
+        "tool": "utility_life", "action": "dictionary_sample",
+        "needs": "Internet",
+    },
+    {
+        "id": "audio_converter", "name": "Audio Converter", "icon": "🎵",
+        "job": "Audio format bodlano (ffmpeg).",
+        "tool": "utility_media", "action": "audio_converter_status",
+        "needs": "ffmpeg",
+    },
+    {
+        "id": "video_downloader", "name": "Video Downloader", "icon": "📥",
+        "job": "PUBLIC video download (yt-dlp).",
+        "tool": "utility_media", "action": "video_downloader_status",
+        "needs": "yt-dlp + public video",
+    },
+    {
+        "id": "youtube", "name": "YouTube", "icon": "📺",
+        "job": "Search + play Mark-er nijer video screen-e. Like/Comment "
+               "korte login/token lagbe — fake kokhono na.",
+        "tool": "youtube_play", "action": "youtube_play_run",
+        "needs": "YouTube API key (search) / OAuth token (like/comment)",
+    },
+    {
+        "id": "sms_sender", "name": "SMS Sender", "icon": "📱",
+        "job": "Phone diye SMS pathano (relay).",
+        "tool": "utility_phone", "action": "sms_sender_status",
+        "needs": "Phone pair kora",
+    },
+    {
+        "id": "call_log", "name": "Call Log", "icon": "📞",
+        "job": "Phone-er shesh call-er log (relay).",
+        "tool": "utility_phone", "action": "call_log_run",
+        "needs": "Phone pair kora",
+    },
+    {
+        "id": "step_counter", "name": "Step Counter", "icon": "👣",
+        "job": "Aaj koto step — phone theke (relay).",
+        "tool": "utility_phone", "action": "step_counter_run",
+        "needs": "Phone pair kora",
+    },
+    {
+        "id": "password_vault", "name": "Password Vault", "icon": "🔐",
+        "job": "Password encrypted kore save (AES-256-GCM).",
+        "tool": "utility_vault", "action": "vault_status", "needs": "",
+    },
+    {
+        "id": "video_upload_browser", "name": "Video Upload (Browser)",
+        "icon": "📤",
+        "job": "Instagram/Facebook/YouTube-e browser diye video upload.",
+        "tool": "video_upload_browser",
+        "action": "video_upload_browser_status",
+        "needs": "Instagram/Facebook/YouTube login (Chrome-e)",
+    },
+    {
+        "id": "social_auto", "name": "Social Auto", "icon": "💬",
+        "job": "Instagram/Facebook like/comment/message/auto-reply "
+               "(permission-first).",
+        "tool": "social_auto", "action": "social_auto_status",
+        "needs": "Instagram/Facebook login (Chrome-e); sob toggle default OFF",
+    },
+    {
+        "id": "mouse_video_edit", "name": "Mouse Video Editor", "icon": "✂️",
+        "job": "CapCut/Premiere-e mouse diye video edit (manusher moto).",
+        "tool": "mouse_video_edit", "action": "mouse_video_edit_status",
+        "needs": "CapCut/Premiere/Clipchamp install (na thakle ffmpeg)",
+    },
+    {
+        "id": "app_editor", "name": "App Editor", "icon": "🖥️",
+        "job": "Jekono desktop app khule mouse diye chalano.",
+        "tool": "app_editor", "action": "app_editor_status",
+        "needs": "App-ta PC-te install thakte hobe",
+    },
+    {
+        "id": "advanced_browser", "name": "Advanced Browser Control",
+        "icon": "🌐",
+        "job": "Chrome-e manusher moto: kholo/click/type/fill/scroll/play/"
+               "upload/tab — prottek step verify kore.",
+        "tool": "advanced_browser", "action": "advanced_browser_status",
+        "needs": "Chrome + Playwright/CDP driver",
+    },
 ]
 
 _BY_ID = {c["id"]: c for c in CARD_DEFS}
@@ -286,7 +612,8 @@ def _ready(card: dict) -> tuple[bool, str]:
                     return False, "YouTube API key set kora nei"
             except Exception:
                 pass
-        if cid in ("live_screen", "file_transfer", "phone_control"):
+        if cid in ("live_screen", "file_transfer", "phone_control",
+                   "sms_sender", "call_log", "step_counter"):
             try:
                 from core import jarvis_link as _jl
                 link = _jl.LINK
@@ -294,6 +621,14 @@ def _ready(card: dict) -> tuple[bool, str]:
                     return False, "Phone pair kora nei"
             except Exception:
                 return False, "Phone link check korte parlam na"
+        if cid == "youtube":
+            try:
+                from core import connectors as _conn
+                if not _conn.get_token("youtube_api_key"):
+                    return False, ("YouTube API key set kora nei "
+                                   "(search-er jonno; direct URL chalano jabe)")
+            except Exception:
+                pass
         if cid == "browser_control":
             try:
                 from core import browser_driver as _bd
@@ -721,6 +1056,198 @@ def _file_organizer_status() -> str:
         return f"File Organizer-er status dekhte parlam na: {e}"
 
 
+# ── 50 utility card actions ──────────────────────────────────────────────────
+# Zero-arg actions: Run shows the real status / a real sample result, or
+# says plainly what input it needs. Nothing here starts a side effect on
+# a plain Run (no timer armed, no file written, no message sent).
+
+def _ut(fn_name, *args, **kwargs):
+    """Call a core/utility_tools function by name. Never raises."""
+    try:
+        from core import utility_tools as _u
+        return str(getattr(_u, fn_name)(*args, **kwargs))
+    except Exception as e:
+        return f"Utility chalate parlam na: {e}"
+
+
+def _ut_action(fn_name, *args, **kwargs):
+    """Build a zero-arg card action around a utility function."""
+    def _act():
+        return _ut(fn_name, *args, **kwargs)
+    return _act
+
+
+from pathlib import Path as _Path
+
+_timer_status = _ut_action("timer_status")
+_stopwatch_status = _ut_action("stopwatch", "status")
+_pomodoro_status = _ut_action("pomodoro", "status")
+_world_clock_status = _ut_action("world_clock")
+_sleep_timer_status = _ut_action("sleep_timer_status")
+_unit_convert_sample = _ut_action("unit_convert", 1, "km", "mile")
+_currency_convert_sample = _ut_action("currency_convert", 1, "USD", "INR")
+_code_format_sample = _ut_action("code_format", "x = 1\nprint(x)", "python")
+_json_view_sample = _ut_action("json_view", '{"name": "Mark", "version": 1}')
+_regex_test_sample = _ut_action("regex_test", r"\d+", "abc 123 def 45")
+_file_search_sample = _ut_action("file_search", "MarkLVII",
+                                 str(_Path.home() / "Downloads"))
+_storage_analyzer_run = _ut_action("storage_analyzer")
+_disk_cleanup_preview = _ut_action("disk_cleanup", True)
+_clipboard_get = _ut_action("clipboard", "get")
+_system_info_run = _ut_action("system_info")
+_process_list_run = _ut_action("process_list")
+_startup_list_run = _ut_action("startup_list")
+_network_speed_run = _ut_action("network_speed_test")
+_wifi_networks_run = _ut_action("wifi_networks")
+_bluetooth_devices_run = _ut_action("bluetooth_devices")
+_vpn_status_run = _ut_action("vpn_status")
+_battery_monitor_run = _ut_action("battery_monitor")
+_screen_recorder_status = _ut_action("screen_record", "status")
+_qr_generator_sample = _ut_action(
+    "qr_generate", "https://mark-lvii-dashboard.onrender.com",
+    "mark-dashboard")
+_password_generator_run = _ut_action("password_generate", 16)
+_notes_list = _ut_action("note_list")
+_habit_status_run = _ut_action("habit_status")
+_expense_summary_run = _ut_action("expense_summary")
+_bookmark_list_run = _ut_action("bookmark_list")
+_contacts_list = _ut_action("contact_find", "")
+_calendar_today_run = _ut_action("calendar_today")
+_flashcard_quiz_run = _ut_action("flashcard_quiz")
+_quiz_make_run = _ut_action("quiz_make", "", 3)
+_poll_status_run = _ut_action("poll_status")
+_dictionary_sample = _ut_action("dictionary_lookup", "hello")
+_call_log_run = _ut_action("call_log")
+_step_counter_run = _ut_action("step_counter")
+_vault_status = _ut_action("vault_get", "")
+
+
+def _focus_mode_status():
+    return ("🎯 Focus mode — chalu korte 'focus mode on' bolo (25 min, "
+            "notification bondho thakbe). Bondho korte 'focus mode off'.")
+
+
+def _zip_tool_status():
+    return ("📦 Zip Tool — zip banate 'zip banao <folder/file>' bolo, "
+            "khulte 'zip kholo <file.zip>' bolo.")
+
+
+def _download_manager_status():
+    return ("⬇️ Download Manager — download korte URL dao: "
+            "'download koro <url>'. 100 MB-er beshi file nebo na.")
+
+
+def _image_resizer_status():
+    return ("🖼️ Image Resizer — resize korte 'image resize koro <path> "
+            "<width>' bolo (jemon: 800).")
+
+
+def _meme_maker_status():
+    return ("😂 Meme Maker — meme banate image + upore/niche text dao: "
+            "'meme banao <image> | <upore> | <niche>'.")
+
+
+def _subtitle_maker_status():
+    return ("💬 Subtitle Maker — subtitle banate text dao (prottek line "
+            "ekta caption): 'subtitle banao <text>'. Video-r pashe .srt "
+            "likhbo.")
+
+
+def _invoice_maker_status():
+    return ("🧾 Invoice Maker — invoice banate 'invoice banao <client> | "
+            "<amount> | <item>' bolo. Excel (.xlsx) file banabo.")
+
+
+def _resume_builder_status():
+    return ("📄 Resume Builder — resume banate 'resume banao <naam> | "
+            "<role> | <skill1, skill2>' bolo. DOCX file banabo.")
+
+
+def _audio_converter_status():
+    return ("🎵 Audio Converter — convert korte 'audio convert koro "
+            "<file> <mp3/wav/ogg>' bolo. ffmpeg lagbe.")
+
+
+def _video_downloader_status():
+    return ("📥 Video Downloader — sudhu PUBLIC video: 'video download "
+            "koro <url>' bolo. yt-dlp lagbe; private/login video hobe na.")
+
+
+def _sms_sender_status():
+    return ("📱 SMS Sender — SMS pathate 'SMS pathao <number>-e: <message>' "
+            "bolo. Phone pair kora thakte hobe.")
+
+
+def _youtube_play_run():
+    """Play a Sheru video on Mark's own video screen (HUD player when
+    available, else Chrome via the browser driver). Honest when the
+    YouTube API key / Chrome is missing. Never raises."""
+    try:
+        from core import youtube_agent as _yt
+        return _yt.play_video("Sheru")
+    except Exception as e:
+        return f"YouTube chalate parlam na: {e}"
+
+
+def _video_upload_browser_status() -> str:
+    try:
+        from core import video_upload as _vu
+        lines = ["📤 Video Upload (Browser) — readiness:",
+                 "  • Sites: Instagram, Facebook, YouTube (browser diye)",
+                 f"  • Mode: {_vu.get_mode()} (Manual-e tumi click koro, ami dekhi)",
+                 "  • Instagram limit: " + _vu.site_limit("instagram"),
+                 "  • Facebook limit: " + _vu.site_limit("facebook"),
+                 "  • YouTube limit: " + _vu.site_limit("youtube"),
+                 "  • Login lagbe prottek site-e (Chrome-e tomar account)"]
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Video Upload status dekhte parlam na: {e}"
+
+
+def _social_auto_status() -> str:
+    try:
+        from core import social_auto as _sa
+        t = _sa.toggles()
+        lines = ["💬 Social Auto — toggles (sob OFF by default):"]
+        for name in _sa.TOGGLES:
+            lines.append(f"  • {name}: {'ON' if t.get(name) else 'OFF'}")
+        lines.append(_sa.limits_text())
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Social Auto status dekhte parlam na: {e}"
+
+
+def _mouse_video_edit_status() -> str:
+    try:
+        from core import mouse_video_edit as _mve
+        return "✂️ Mouse Video Editor — " + _mve.editor_status_text()
+    except Exception as e:
+        return f"Mouse Video Editor status dekhte parlam na: {e}"
+
+
+def _app_editor_status() -> str:
+    return ("🖥️ App Editor — jekono desktop app khule mouse diye chalai "
+            "(Notepad/Word/Paint/Photos...). App-er naam bolo.")
+
+
+def _advanced_browser_status() -> str:
+    try:
+        from core import browser_driver as _drv
+        chrome = _drv.find_chrome_exe()
+        lines = ["🌐 Advanced Browser Control — readiness:",
+                 ("✅ Chrome pelam: " + chrome) if chrome else
+                 "❌ Chrome install pelam na ei PC-te",
+                 "  • Actions: open / click / type / fill / scroll / play / "
+                 "upload / multi-tab / wait / screenshot",
+                 "  • Prottek step-er pore page verify hoy; fail hole step-er "
+                 "naam bolei theme jay.",
+                 "  • Login: tomar nijer Chrome profile — ami password dekhi "
+                 "na, rakhi na."]
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Browser Control status dekhte parlam na: {e}"
+
+
 _ACTIONS = {
     "main_status": _main_status,
     "video_upload_status": _video_upload_status,
@@ -753,6 +1280,62 @@ _ACTIONS = {
     "report_writer_status": _report_writer_status,
     "email_sender_status": _email_sender_status,
     "file_organizer_status": _file_organizer_status,
+    # ── 50 utility card actions ──
+    "timer_status": _timer_status,
+    "stopwatch_status": _stopwatch_status,
+    "pomodoro_status": _pomodoro_status,
+    "world_clock_status": _world_clock_status,
+    "sleep_timer_status": _sleep_timer_status,
+    "focus_mode_status": _focus_mode_status,
+    "unit_convert_sample": _unit_convert_sample,
+    "currency_convert_sample": _currency_convert_sample,
+    "code_format_sample": _code_format_sample,
+    "json_view_sample": _json_view_sample,
+    "regex_test_sample": _regex_test_sample,
+    "file_search_sample": _file_search_sample,
+    "zip_tool_status": _zip_tool_status,
+    "storage_analyzer_run": _storage_analyzer_run,
+    "disk_cleanup_preview": _disk_cleanup_preview,
+    "download_manager_status": _download_manager_status,
+    "image_resizer_status": _image_resizer_status,
+    "clipboard_get": _clipboard_get,
+    "system_info_run": _system_info_run,
+    "process_list_run": _process_list_run,
+    "startup_list_run": _startup_list_run,
+    "network_speed_run": _network_speed_run,
+    "wifi_networks_run": _wifi_networks_run,
+    "bluetooth_devices_run": _bluetooth_devices_run,
+    "vpn_status_run": _vpn_status_run,
+    "battery_monitor_run": _battery_monitor_run,
+    "screen_recorder_status": _screen_recorder_status,
+    "qr_generator_sample": _qr_generator_sample,
+    "password_generator_run": _password_generator_run,
+    "meme_maker_status": _meme_maker_status,
+    "subtitle_maker_status": _subtitle_maker_status,
+    "invoice_maker_status": _invoice_maker_status,
+    "resume_builder_status": _resume_builder_status,
+    "notes_list": _notes_list,
+    "habit_status_run": _habit_status_run,
+    "expense_summary_run": _expense_summary_run,
+    "bookmark_list_run": _bookmark_list_run,
+    "contacts_list": _contacts_list,
+    "calendar_today_run": _calendar_today_run,
+    "flashcard_quiz_run": _flashcard_quiz_run,
+    "quiz_make_run": _quiz_make_run,
+    "poll_status_run": _poll_status_run,
+    "dictionary_sample": _dictionary_sample,
+    "audio_converter_status": _audio_converter_status,
+    "video_downloader_status": _video_downloader_status,
+    "youtube_play_run": _youtube_play_run,
+    "sms_sender_status": _sms_sender_status,
+    "call_log_run": _call_log_run,
+    "step_counter_run": _step_counter_run,
+    "vault_status": _vault_status,
+    "video_upload_browser_status": _video_upload_browser_status,
+    "social_auto_status": _social_auto_status,
+    "mouse_video_edit_status": _mouse_video_edit_status,
+    "app_editor_status": _app_editor_status,
+    "advanced_browser_status": _advanced_browser_status,
 }
 
 

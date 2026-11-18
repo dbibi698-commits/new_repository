@@ -62,6 +62,14 @@ INTENT_WORKERS = {
     "hosting_autofix": ("builder", "Hosting Auto-Fix"),
     "browser_control": ("browser", "Browser Control"),
     "photo_edit": ("media", "Photo Editor"),
+    "file_edit": ("builder", "File Edit"),
+    "auto_push": ("builder", "Auto-Push"),
+    "youtube_play": ("media", "YouTube"),
+    "auto_task": ("commander", "Auto Tasks"),
+    "video_upload": ("media", "Video Upload"),
+    "social_auto": ("social", "Social Auto"),
+    "mouse_video_edit": ("media", "Mouse Video Edit"),
+    "app_editor": ("desktop", "App Editor"),
 }
 
 _INTENT_KEYWORDS = [
@@ -79,6 +87,23 @@ _INTENT_KEYWORDS = [
                          "browser-e", "chrome-e"]),
     ("photo_edit", ["photo edit", "chobi edit", "6 copy", "a4 kore",
                     "photo-ta", "chobi-ta"]),
+    ("file_edit", ["file edit", "file-ta edit", "file bodlao", "edit koro",
+                   "code-ta bodlao", "file-e likho"]),
+    ("auto_push", ["github-e push", "github push", "auto-push", "repo-te push",
+                  "push koro"]),
+    ("video_upload", ["video upload", "upload koro", "reel dao",
+                      "instagram-e dao", "facebook-e dao", "youtube-e dao",
+                      "reel upload", "video-ta upload"]),
+    ("youtube_play", ["youtube", "video chalao", "video-ta chalao",
+                      "youtube-e"]),
+    ("auto_task", ["task banao", "protidin", "proti robibar", "proti masher",
+                   "reminder dao", "schedule koro", "automatic task"]),
+    ("social_auto", ["like koro", "comment koro", "auto like", "reel like",
+                    "dm koro", "auto reply", "social auto"]),
+    ("mouse_video_edit", ["capcut", "video edit koro", "mouse diye edit",
+                         "video-ta edit"]),
+    ("app_editor", ["app kholo", "word-e likho", "notepad-e likho",
+                   "app-ta kholo"]),
 ]
 
 
@@ -418,6 +443,51 @@ def _run_step(step: dict, payload: dict | None = None,
         if intent == "photo_edit":
             from core import photo_editor as _pe
             return _pe.handle_phone_request(subtask, payload=payload)
+        if intent == "file_edit":
+            # File edit: payload {path, old, new, confirmed} or a
+            # "file edit <path> :: <old> :: <new>" clause. Shows a diff
+            # first; writes only when confirmed=True (the confirm gate
+            # asks the user). Never touches api_keys/jarvis_link.
+            from core import file_edit as _fe
+            path = str(payload.get("path") or "")
+            old = str(payload.get("old") or payload.get("old_text") or "")
+            new = str(payload.get("new") or payload.get("new_text") or "")
+            if not path and "::" in subtask:
+                parts = [p.strip() for p in subtask.split("::")]
+                if len(parts) >= 3:
+                    path = parts[0].split()[-1]
+                    old, new = parts[1], parts[2]
+            if not path or not old:
+                return ("File edit korte path + purono text dao — "
+                        "jemon: file edit C:\\\\x\\\\a.txt :: purono :: notun")
+            return _fe.edit_file(
+                path, old, new,
+                confirmed=bool(payload.get("confirmed")))
+        if intent == "auto_push":
+            from core import auto_push as _ap
+            folder = str(payload.get("folder") or payload.get("path") or "")
+            if not folder:
+                m = re.search(r"([A-Za-z]:\\[^\s\"']+|\S+)", subtask)
+                folder = m.group(1) if m else ""
+            if not folder:
+                return ("Konta project push korbo — folder-er path dao.")
+            return _ap.auto_push_project(
+                folder, repo_name=str(payload.get("repo") or ""),
+                private=bool(payload.get("private", True)))
+        if intent == "youtube_play":
+            from core import youtube_agent as _yt
+            q = str(payload.get("query") or payload.get("url") or "") or subtask
+            action = str(payload.get("action") or "play").lower()
+            if action == "like":
+                return _yt.like_video(str(payload.get("video_id") or q))
+            if action == "comment":
+                return _yt.comment_video(
+                    str(payload.get("video_id") or q),
+                    str(payload.get("text") or ""))
+            return _yt.play_video(q)
+        if intent == "auto_task":
+            from core import auto_tasks as _at
+            return _at.create_task_from_text(subtask or str(payload.get("order") or ""))
         # General / Commander-direct step: no worker tool matched.
         if retry:
             # Second worker: the model answers directly.

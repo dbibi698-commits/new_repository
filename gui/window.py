@@ -110,6 +110,7 @@ class MainWindow(QMainWindow):
     _ask_muse_sig    = pyqtSignal()   # 💬 ASK MUSE — queue current work to Muse Bridge
     _state_sig      = pyqtSignal(str)
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
+    _live_reply_sig = pyqtSignal(str)        # streaming reply text (HUD live line) — thread-safe
     _codejob_sig    = pyqtSignal(object)     # dev_agent job state — live coding panel
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
@@ -421,6 +422,7 @@ class MainWindow(QMainWindow):
         self._ask_muse_sig.connect(self._ask_muse)
         self._state_sig.connect(self._apply_state)
         self._content_sig.connect(self._show_content)
+        self._live_reply_sig.connect(self._show_live_reply)
         self._codejob_sig.connect(self._show_code_job)
         self._reconfig_sig.connect(self._show_setup)
         self._camera_sig.connect(self._show_camera_frame)
@@ -1259,6 +1261,15 @@ class MainWindow(QMainWindow):
         self._sub_lbl.setFont(px_font(9, QFont.Weight.DemiBold, spacing=2.2))
         self._sub_lbl.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent;")
         name_col.addWidget(self._sub_lbl)
+        # Live-reply line — the reply streams here as it arrives (fast
+        # replies + Gemini output_transcription), so the user never stares
+        # at a silent "thinking" state. Empty = hidden.
+        self._live_reply_lbl = QLabel("")
+        self._live_reply_lbl.setFont(px_font(11))
+        self._live_reply_lbl.setStyleSheet(f"color: {C.WHITE}; background: transparent;")
+        self._live_reply_lbl.setWordWrap(True)
+        self._live_reply_lbl.setVisible(False)
+        name_col.addWidget(self._live_reply_lbl)
         lay.addLayout(name_col)
         lay.addSpacing(8)
 
@@ -1905,6 +1916,20 @@ class MainWindow(QMainWindow):
         new[0] = max(total - want, 120)
         new[idx] = want
         split.setSizes(new)
+
+    def _show_live_reply(self, text: str):
+        """Slot — runs on Qt main thread. Shows the streaming reply under
+        the assistant name; empty text hides the line."""
+        try:
+            t = str(text or "").strip()
+            if not t:
+                self._live_reply_lbl.setVisible(False)
+                self._live_reply_lbl.setText("")
+                return
+            self._live_reply_lbl.setText(t[:220] + ("…" if len(t) > 220 else ""))
+            self._live_reply_lbl.setVisible(True)
+        except Exception:
+            pass
 
     def _show_content(self, title: str, text: str):
         """Slot — runs on Qt main thread. Updates and shows the content panel."""
