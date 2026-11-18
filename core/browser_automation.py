@@ -186,6 +186,34 @@ def run_steps(steps: list[dict], driver: Driver,
             elif action == "read":
                 ok, msg = driver.read_text(step.get("selector") or None)
                 msg = (msg[:400] if ok else msg)
+            elif action == "fill_form":
+                # fields: {selector: text}; submit: selector (optional).
+                fields = step.get("fields") or {}
+                if not isinstance(fields, dict) or not fields:
+                    ok, msg = False, "fill_form-e fields dao."
+                else:
+                    ok, msg = driver.fill_form(
+                        fields, step.get("submit") or None)
+            elif action == "new_tab":
+                ok, msg = driver.new_tab(str(step.get("url") or "") or None)
+            elif action == "switch_tab":
+                try:
+                    ok, msg = driver.switch_tab(int(step.get("index") or 0))
+                except Exception:
+                    ok, msg = False, "switch_tab-e index dao (number)."
+            elif action == "close_tab":
+                idx = step.get("index")
+                try:
+                    ok, msg = driver.close_tab(
+                        None if idx is None else int(idx))
+                except Exception:
+                    ok, msg = False, "close_tab-e index dao (number)."
+            elif action == "scroll_to":
+                ok, msg = driver.scroll_to_element(
+                    str(step.get("selector") or ""))
+            elif action == "screenshot":
+                ok, msg = driver.screenshot(
+                    str(step.get("path") or "browser-shot.png"))
             else:
                 ok, msg = False, f"Unknown step action: {action}"
         except Exception as e:  # a driver bug must not escape as a crash
@@ -309,6 +337,76 @@ def github_new_repo(name: str, description: str = "", private: bool = False,
     except Exception as e:
         return False, f"Repo banate parlam na: {e}"
 
+
+# ── Advanced: form fill + tabs (advanced round) ─────────────────────────────
+
+def form_fill(url: str, fields: dict, submit: str | None = None,
+              driver: Driver | None = None) -> tuple[bool, str]:
+    """Open a URL and fill a form, optionally submitting it. `fields` is
+    {selector: text}. Returns ``(ok, message)`` — success carries the URL
+    after the submit. Never raises. ``driver`` is injectable for tests."""
+    try:
+        url = (url or "").strip()
+        if not url:
+            return False, "Form bhorar jonno URL dao."
+        if not isinstance(fields, dict) or not fields:
+            return False, "Form bhorar jonno field dao — {selector: text}."
+        own_driver = False
+        if driver is None:
+            driver, _backend, msg = ensure_driver()
+            if driver is None:
+                return False, msg
+            own_driver = True
+        try:
+            ok, msg = driver.navigate(url)
+            if not ok:
+                return False, msg
+            ok, msg = driver.fill_form(fields, submit)
+            if not ok:
+                return False, msg
+            after = driver.current_url()
+            return True, (f"✅ Form bhorlam: {msg} "
+                          f"(ekhon: {after or url})")
+        finally:
+            if own_driver:
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        return False, f"Form bhorte parlam na: {e}"
+
+
+def list_open_tabs(driver: Driver | None = None) -> tuple[bool, str]:
+    """One-line summary of the open tabs (for chat / cards)."""
+    try:
+        own_driver = False
+        if driver is None:
+            driver, _backend, msg = ensure_driver()
+            if driver is None:
+                return False, msg
+            own_driver = True
+        try:
+            ok, tabs = driver.list_tabs()
+            if not ok:
+                return False, "Tab-er list pelam na — driver ready noy."
+            if not tabs:
+                return True, "Kono tab khula nei."
+            lines = [f"🌐 {len(tabs)} ta tab khula:"]
+            for t in tabs:
+                mark = "▶️ " if t.get("current") else "   "
+                lines.append(f"{mark}[{t['index']}] "
+                             f"{t.get('title') or '(no title)'} — "
+                             f"{t.get('url') or ''}")
+            return True, "\n".join(lines)
+        finally:
+            if own_driver:
+                try:
+                    driver.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        return False, f"Tab-er list dekhte parlam na: {e}"
 
 # ── Render: deploy a web service ─────────────────────────────────────────────
 

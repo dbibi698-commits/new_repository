@@ -75,6 +75,19 @@ _MANIFEST_DEFAULTS = {
     "android:exported": "true",
 }
 
+# Plugins whose version is unambiguous when the log says the plugin was
+# not found: (dependency coordinate, known-good version).
+_PLUGIN_VERSIONS = {
+    "com.android.application": ("com.android.tools.build:gradle", "8.5.2"),
+    "com.android.library": ("com.android.tools.build:gradle", "8.5.2"),
+    "org.jetbrains.kotlin.android": (
+        "org.jetbrains.kotlin:kotlin-gradle-plugin", "2.0.0"),
+}
+
+# Gradle version for a JDK class-file major version the wrapper cannot
+# read ("Unsupported class file major version 65" = JDK 21, etc.).
+_GRADLE_FOR_CLASS_MAJOR = {65: "8.5", 66: "8.8", 67: "8.10", 68: "8.11"}
+
 # Symbols whose import is unambiguous — the ONLY syntax fixes applied
 # mechanically. Anything else is reported with file + line, not guessed.
 _KNOWN_IMPORTS = {
@@ -112,6 +125,11 @@ _CLASS_LABEL = {
     "syntax": "Kotlin/Java syntax error",
     "transient": "network / transient error",
     "auth": "GitHub token / permission problem",
+    "gradle_version": "Gradle version error",
+    "kotlin_version": "Kotlin version error",
+    "dex": "DEX / 64K methods error",
+    "resource": "Android resource error",
+    "sdk": "Android SDK error",
     "unknown": "unknown build error",
 }
 
@@ -312,13 +330,56 @@ def classify_failure(log_text: str) -> dict:
                      r"|resource not accessible by integration", low):
             return {"class": "auth", "auto_fixable": False,
                     "detail": "GitHub token / permission problem"}
+        # (f) Android SDK — the runner has no SDK / compileSdk missing.
+        # Checked before dependency: "SDK location not found" must never
+        # be mistaken for a missing library.
+        sdk_re = re.compile(
+            r"(sdk location not found[^\n]{0,120}"
+            r"|android_home.{0,40}(not set|is not set|not found)"
+            r"|android sdk.{0,60}(not found|not installed|missing)"
+            r"|compileSdk.{0,60}(not specified|is not specified|missing)"
+            r"|sdkmanager.{0,60}(not found|failed))", re.I)
+        m = sdk_re.search(log)
+        if m:
+            return {"class": "sdk", "auto_fixable": False,
+                    "detail": _trunc(" ".join(m.group(0).split()), 200)}
+        # (g) Gradle version — the wrapper is too old for the JDK/AGP, or
+        # the log names a minimum Gradle version. Checked before
+        # dependency: "Could not find org.gradle..." would match the dep
+        # pattern first and the pin logic cannot fix a Gradle version.
+        gv_re = re.compile(
+            r"(minimum supported gradle version is[^\n]{0,80}"
+            r"|gradle version[^\n]{0,80}(is required|required|too old|not supported)"
+            r"|unsupported class file major version[^\n]{0,80}"
+            r"|could not find org\.gradle[^\n]{0,120}"
+            r"|this version of the android gradle plugin requires gradle[^\n]{0,80}"
+            r"|gradle-[0-9][^\s]*-bin\.zip[^\n]{0,80}(not found|404|failed))", re.I)
+        m = gv_re.search(log)
+        if m:
+            return {"class": "gradle_version", "auto_fixable": True,
+                    "detail": _trunc(" ".join(m.group(0).split()), 200)}
+        # (h) Kotlin version — plugin loaded twice, or a Kotlin version
+        # the AGP rejects. (A plain "Could not find ... kotlin-gradle-
+        # plugin" stays a dependency — the pin logic handles that one.)
+        kv_re = re.compile(
+            r"(kotlin gradle plugin was loaded multiple times[^\n]{0,120}"
+            r"|kotlin version[^\n]{0,80}(not compatible|incompatible|is not supported)"
+            r"|incompatible kotlin version[^\n]{0,120}"
+            r"|the kotlin gradle plugin[^\n]{0,80}(requires|needs)[^\n]{0,80}"
+            r"|kotlin-stdlib[^\n]{0,60}version conflict[^\n]{0,80})", re.I)
+        m = kv_re.search(log)
+        if m:
+            return {"class": "kotlin_version", "auto_fixable": True,
+                    "detail": _trunc(" ".join(m.group(0).split()), 200)}
         # (a) dependency / version.
         dep_re = re.compile(
             r"(could not (?:find|resolve|download)[^\n]{0,160}"
             r"|failed to resolve:[^\n]{0,160}"
             r"|unable to resolve dependency[^\n]{0,160}"
             r"|could not get resource[^\n]{0,120}"
-            r"|version conflict[^\n]{0,160})", re.I)
+            r"|version conflict[^\n]{0,160}"
+            r"|plugin (?:with id|)\s*'[^']+' was not found[^\n]{0,120}"
+            r"|plugin \[id: '[^']+'[^\n]{0,40}was not found[^\n]{0,120})", re.I)
         m = dep_re.search(log)
         if m:
             return {"class": "dependency", "auto_fixable": True,
@@ -334,6 +395,29 @@ def classify_failure(log_text: str) -> dict:
         if m:
             return {"class": "manifest", "auto_fixable": True,
                     "detail": _trunc(" ".join(m.group(0).split()), 200)}
+        # (i) DEX / 64K — too many methods for one dex file.
+        dex_re = re.compile(
+            r"(cannot fit requested classes in a single dex file[^\n]{0,120}"
+            r"|dexarchivemergerexception[^\n]{0,120}"
+            r"|the number of method references in a \.dex file cannot exceed 64k[^\n]{0,80}"
+            r"|transformdexarchivewithdexmerger[^\n]{0,80}failed[^\n]{0,80})", re.I)
+        m = dex_re.search(log)
+        if m:
+            return {"class": "dex", "auto_fixable": True,
+                    "detail": _trunc(" ".join(m.group(0).split()), 200)}
+        # (j) Android resources — AAPT linking failed, a resource is
+        # missing or duplicated. Reported, never guessed: the missing file
+        # has to be added by hand.
+        res_re = re.compile(
+            r"(aapt[^\n]{0,40}error: resource[^\n]{0,120}"
+            r"|failed linking references[^\n]{0,120}"
+            r"|resource linking failed[^\n]{0,120}"
+            r"|duplicate resources?[^\n]{0,120}"
+            r"|error: (?:failed to find|resource)[^\n]{0,80}not found[^\n]{0,80})", re.I)
+        m = res_re.search(log)
+        if m:
+            return {"class": "resource", "auto_fixable": False,
+                    "detail": _trunc(" ".join(m.group(0).split()), 200)}
         # (d) Kotlin / Java syntax.
         syn_re = re.compile(
             r"(unresolved reference:\s*[A-Za-z_][A-Za-z0-9_]*"
@@ -341,6 +425,10 @@ def classify_failure(log_text: str) -> dict:
             r"|syntax error[^\n]{0,120}"
             r"|';' expected[^\n]{0,120}"
             r"|error:\s*(class|interface|enum) expected[^\n]{0,80}"
+            r"|expecting (a top level|member) declaration[^\n]{0,80}"
+            r"|type mismatch[^\n]{0,120}"
+            r"|overload resolution ambiguity[^\n]{0,120}"
+            r"|none of the following functions can be called[^\n]{0,120}"
             r"|compilation failed[^\n]{0,120})", re.I)
         m = syn_re.search(log)
         if m:
@@ -348,9 +436,10 @@ def classify_failure(log_text: str) -> dict:
                     "detail": _trunc(" ".join(m.group(0).split()), 200)}
         # (e) network / transient.
         if re.search(
-                r"(connection (reset|timed out|refused)|timed out|timeout"
+                r"(connection (reset|timed out|refused)|timed out|timeout|read timed out"
                 r"|temporary failure|socket ?timeout|network (error|is unreachable)"
                 r"|502 bad gateway|503 service unavailable|504 gateway time-out"
+                r"|http 429|too many requests"
                 r"|internal server error|api rate limit|rate limit exceeded"
                 r"|runner.*lost communication|runner has received a shutdown signal"
                 r"|could not get .*https?://[^\s]+ (500|502|503))", low):
@@ -413,8 +502,58 @@ def _pick_version(log: str, coord: str, current: str) -> str:
 def _fix_dependency(log: str, owner: str, repo: str, workflow: str, ref: str,
                     read_fn, push_fn) -> tuple[bool, str]:
     """Pin a dynamic dependency version, or swap a failed concrete version
-    for another one the log names. Returns (applied, message)."""
+    for another one the log names. Also handles "Plugin [id: 'x'] was not
+    found" for known plugins by adding the missing version to the plugin
+    block. Returns (applied, message)."""
     try:
+        # Plugin id not found — the plugin block has no version for a
+        # known plugin. Add the known version; never invent a new one.
+        plug_m = re.search(
+            r"plugin (?:\[id: '|with id ')([a-z0-9_.\-]+)'", log, re.I)
+        if plug_m:
+            plug_id = plug_m.group(1)
+            known = _PLUGIN_VERSIONS.get(plug_id)
+            if not known:
+                return False, (f"Plugin '{plug_id}' pelam na, kintu er "
+                               "version ami janina — build file-e plugin-ta "
+                               "khule version-ta bosao.")
+            _coord, version = known
+            for path in ("build.gradle.kts", "build.gradle"):
+                try:
+                    content, _sha = read_fn(owner, repo, path, ref)
+                except Exception:
+                    content = None
+                if not content or plug_id not in content:
+                    continue
+                # kts: id("x") / id("x") version "y"; groovy: id 'x' / id 'x' version 'y'
+                kts_m = re.search(re.escape(f'id("{plug_id}")')
+                                  + r"(\s+version\s+\"[^\"]+\")?", content)
+                grv_m = None
+                if not kts_m:
+                    grv_m = re.search(re.escape(f"id '{plug_id}'")
+                                      + r"(\s+version\s+'[^']+')?", content)
+                m = kts_m or grv_m
+                if not m:
+                    continue
+                if m.group(1):
+                    return False, (f"Plugin '{plug_id}'-er version already "
+                                   "ache — version-tai bhul hote pare, nije "
+                                   "version-ta thik koro.")
+                quote = '"' if kts_m else "'"
+                new_content = (content[:m.end()] +
+                               f" version {quote}{version}{quote}" +
+                               content[m.end():])
+                try:
+                    res = push_fn(owner, repo, path, new_content,
+                                  f"self-heal: add version {version} to plugin {plug_id}")
+                except Exception as e:
+                    return False, f"fix-ta push korte parlam na: {e}"
+                if str(res or "").strip().startswith("✅"):
+                    return True, (f"{path}-e plugin '{plug_id}'-er version "
+                                  f"{version} bosiye dilam, tarpor abar build dilam.")
+                return False, f"fix-ta push holo na: {_trunc(res, 200)}"
+            return False, (f"Plugin '{plug_id}'-r line-ta root build file-e "
+                           "pelam na — plugin block-ta khule dekho.")
         m = re.search(
             r"(?:could not (?:find|resolve|download)|failed to resolve:|"
             r"unable to resolve dependency)[^\n]*?"
@@ -588,6 +727,178 @@ def _fix_syntax(log: str, owner: str, repo: str, ref: str,
         return False, f"syntax fix korte parlam na: {e}"
 
 
+def _fix_gradle_version(log: str, owner: str, repo: str, ref: str,
+                        read_fn, push_fn) -> tuple[bool, str]:
+    """Bump the Gradle wrapper to the version the log names (or a
+    known-good one for the JDK). Returns (applied, message)."""
+    try:
+        target = ""
+        m = re.search(r"minimum supported gradle version is\s+"
+                      r"(\d+\.\d+(?:\.\d+)?)", log, re.I)
+        if m:
+            target = m.group(1)
+        if not target:
+            m = re.search(r"unsupported class file major version\s+(\d+)",
+                          log, re.I)
+            if m:
+                target = _GRADLE_FOR_CLASS_MAJOR.get(int(m.group(1)), "8.7")
+        if not target:
+            m = re.search(r"requires gradle\s+(\d+\.\d+(?:\.\d+)?)", log, re.I)
+            if m:
+                target = m.group(1)
+        if not target:
+            target = "8.7"
+        path = "gradle/wrapper/gradle-wrapper.properties"
+        try:
+            content, _sha = read_fn(owner, repo, path, ref)
+        except Exception:
+            content = None
+        if not content or "distributionUrl" not in content:
+            return False, ("Gradle wrapper-er properties file-ta repo-te "
+                           "pelam na — gradle/wrapper/gradle-wrapper.properties "
+                           f"khule distributionUrl-e Gradle {target} bosao.")
+        new_content = re.sub(
+            r"gradle-(\d+\.\d+(?:\.\d+)?)-bin\.zip",
+            f"gradle-{target}-bin.zip", content, count=1)
+        if new_content == content:
+            return False, ("Gradle wrapper-e version-ta pelam na — "
+                           "gradle-wrapper.properties nije khule dekho.")
+        try:
+            res = push_fn(owner, repo, path, new_content,
+                          f"self-heal: bump Gradle wrapper to {target}")
+        except Exception as e:
+            return False, f"fix-ta push korte parlam na: {e}"
+        if str(res or "").strip().startswith("✅"):
+            return True, (f"Gradle wrapper {target}-e bump korlam, tarpor "
+                          "abar build dilam.")
+        return False, f"fix-ta push holo na: {_trunc(res, 200)}"
+    except Exception as e:
+        return False, f"gradle version fix korte parlam na: {e}"
+
+
+def _fix_kotlin_version(log: str, owner: str, repo: str, ref: str,
+                        read_fn, push_fn) -> tuple[bool, str]:
+    """Pin the Kotlin version the log requires (version catalog first,
+    then the root build file). Returns (applied, message)."""
+    try:
+        target = ""
+        m = re.search(r"requires? kotlin[^\n]{0,60}?(\d+\.\d+(?:\.\d+)?)",
+                      log, re.I)
+        if m:
+            target = m.group(1)
+        if not target:
+            target = "2.0.0"
+        # 1) Version catalog.
+        toml_path = "gradle/libs.versions.toml"
+        try:
+            content, _sha = read_fn(owner, repo, toml_path, ref)
+        except Exception:
+            content = None
+        if content and re.search(r"kotlin\s*=\s*\"", content):
+            new_content = re.sub(r'(kotlin\s*=\s*")[^"]+(")',
+                                 rf"\g<1>{target}\g<2>", content, count=1)
+            if new_content != content:
+                try:
+                    res = push_fn(owner, repo, toml_path, new_content,
+                                  f"self-heal: pin Kotlin to {target}")
+                except Exception as e:
+                    return False, f"fix-ta push korte parlam na: {e}"
+                if str(res or "").strip().startswith("✅"):
+                    return True, (f"libs.versions.toml-e Kotlin {target} "
+                                  "kore dilam, tarpor abar build dilam.")
+                return False, f"fix-ta push holo na: {_trunc(res, 200)}"
+        # 2) Root build file plugin version.
+        for path in ("build.gradle.kts", "build.gradle"):
+            try:
+                content, _sha = read_fn(owner, repo, path, ref)
+            except Exception:
+                content = None
+            if not content or "org.jetbrains.kotlin.android" not in content:
+                continue
+            kts_m = re.search(
+                r'id\("org\.jetbrains\.kotlin\.android"\)\s+version\s+"[^"]+"',
+                content)
+            grv_m = None
+            if not kts_m:
+                grv_m = re.search(
+                    r"id 'org\.jetbrains\.kotlin\.android'\s+version\s+'[^']+'",
+                    content)
+            m = kts_m or grv_m
+            if not m:
+                continue
+            quote = '"' if kts_m else "'"
+            if kts_m:
+                repl = (f'id("org.jetbrains.kotlin.android") version '
+                        f"{quote}{target}{quote}")
+            else:
+                repl = (f"id 'org.jetbrains.kotlin.android' version "
+                        f"{quote}{target}{quote}")
+            new_content = content[:m.start()] + repl + content[m.end():]
+            try:
+                res = push_fn(owner, repo, path, new_content,
+                              f"self-heal: pin Kotlin plugin to {target}")
+            except Exception as e:
+                return False, f"fix-ta push korte parlam na: {e}"
+            if str(res or "").strip().startswith("✅"):
+                return True, (f"{path}-e Kotlin plugin {target} kore dilam, "
+                              "tarpor abar build dilam.")
+            return False, f"fix-ta push holo na: {_trunc(res, 200)}"
+        return False, (f"Kotlin {target} lagbe, kintu version-ta kothay "
+                       "bosabo pelam na — libs.versions.toml ba root "
+                       "build file-e kotlin version-ta khule dekho.")
+    except Exception as e:
+        return False, f"kotlin version fix korte parlam na: {e}"
+
+
+def _fix_dex(log: str, owner: str, repo: str, ref: str,
+             read_fn, push_fn) -> tuple[bool, str]:
+    """Enable multidex (64K methods). Returns (applied, message)."""
+    try:
+        for path in ("app/build.gradle.kts", "app/build.gradle"):
+            try:
+                content, _sha = read_fn(owner, repo, path, ref)
+            except Exception:
+                content = None
+            if not content or "defaultConfig" not in content:
+                continue
+            if "multiDexEnabled" in content:
+                return False, ("multiDex already ON ache — 64K error-ta "
+                               "onno kichu theke asche, log-ta nije dekho.")
+            is_kts = path.endswith(".kts")
+            new_content = content
+            dc_m = re.search(r"defaultConfig\s*\{", content)
+            if not dc_m:
+                continue
+            insert_at = dc_m.end()
+            new_content = (content[:insert_at] +
+                           ("\n        multiDexEnabled = true" if is_kts
+                            else "\n        multiDexEnabled true") +
+                           content[insert_at:])
+            dep_line = ('\n    implementation("androidx.multidex:multidex:2.0.1")'
+                        if is_kts else
+                        "\n    implementation 'androidx.multidex:multidex:2.0.1'")
+            dep_m = re.search(r"dependencies\s*\{", new_content)
+            if dep_m:
+                new_content = (new_content[:dep_m.end()] + dep_line +
+                               new_content[dep_m.end():])
+            if new_content == content:
+                continue
+            try:
+                res = push_fn(owner, repo, path, new_content,
+                              "self-heal: enable multidex (64K)")
+            except Exception as e:
+                return False, f"fix-ta push korte parlam na: {e}"
+            if str(res or "").strip().startswith("✅"):
+                return True, (f"{path}-e multidex ON korlam "
+                              "(multiDexEnabled + multidex lib), tarpor abar "
+                              "build dilam.")
+            return False, f"fix-ta push holo na: {_trunc(res, 200)}"
+        return False, ("app/build.gradle(.kts)-e defaultConfig pelam na — "
+                       "multidex nije on korte hobe.")
+    except Exception as e:
+        return False, f"dex fix korte parlam na: {e}"
+
+
 def apply_fix(classified: dict, log_text: str, owner: str, repo: str,
               workflow: str, ref: str, read_fn, push_fn) -> tuple[bool, str]:
     """Apply the fix for a classified failure. (applied, message).
@@ -607,6 +918,25 @@ def apply_fix(classified: dict, log_text: str, owner: str, repo: str,
                            "bujhte parlam na, log-ta nije dekho.")
         if cls == "transient":
             return True, "network/transient mone hocche — kichu na bodle abar build dilam."
+        if cls == "gradle_version":
+            return _fix_gradle_version(log_text, owner, repo, ref,
+                                       read_fn, push_fn)
+        if cls == "kotlin_version":
+            return _fix_kotlin_version(log_text, owner, repo, ref,
+                                       read_fn, push_fn)
+        if cls == "dex":
+            return _fix_dex(log_text, owner, repo, ref, read_fn, push_fn)
+        if cls == "resource":
+            return False, ("resource error — AAPT linking fail holo, kono "
+                           "resource missing ba duplicate. Kon file-e ki "
+                           "missing log-e lekha ache — oi resource-ta (layout / "
+                           "drawable / string) repo-te bosao, tarpor abar "
+                           "build dao.")
+        if cls == "sdk":
+            return False, ("Android SDK pelam na — runner-e SDK setup lagbe. "
+                           "Workflow file-e setup-android step ache kina dekho "
+                           "(actions/setup-java + android-sdk), ba ANDROID_HOME "
+                           "set koro, tarpor abar build dao.")
         if cls == "dependency":
             return _fix_dependency(log_text, owner, repo, workflow, ref,
                                    read_fn, push_fn)

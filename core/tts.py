@@ -103,10 +103,39 @@ def _play_audio_bytes(audio_bytes: bytes) -> None:
 # ---------------------------------------------------------------------------
 
 class EdgeTTSEngine:
-    """Microsoft EdgeTTS – free, requires internet."""
+    """Microsoft EdgeTTS – free, requires internet.
 
-    def __init__(self, voice: str = "en-US-GuyNeural"):
+    rate (0.5–2.0) and pitch (0.5–2.0) come from the Voice Settings box
+    (core/voice_settings.py); when they differ from 1.0 the text is
+    wrapped in SSML <prosody> so the voice actually changes.
+    """
+
+    def __init__(self, voice: str = "en-US-GuyNeural",
+                 rate: float = 1.0, pitch: float = 1.0):
         self.voice = voice
+        try:
+            self.rate = max(0.5, min(2.0, float(rate or 1.0)))
+        except Exception:
+            self.rate = 1.0
+        try:
+            self.pitch = max(0.5, min(2.0, float(pitch or 1.0)))
+        except Exception:
+            self.pitch = 1.0
+
+    def _ssml(self, text: str) -> str:
+        """Wrap in <prosody> when rate/pitch differ from 1.0."""
+        try:
+            if abs(self.rate - 1.0) < 0.01 and abs(self.pitch - 1.0) < 0.01:
+                return text
+            import html as _html
+            esc = _html.escape(text, quote=False)
+            rate = f"{self.rate:.2f}"
+            pitch = f"{(self.pitch - 1.0) * 100:+.0f}%"
+            return (f'<speak version="1.0" xml:lang="en-US">'
+                    f'<prosody rate="{rate}" pitch="{pitch}">{esc}'
+                    f"</prosody></speak>")
+        except Exception:
+            return text
 
     def speak(self, text: str) -> None:
         loop = asyncio.new_event_loop()
@@ -119,7 +148,7 @@ class EdgeTTSEngine:
 
     async def _synth(self, text: str) -> bytes:
         import edge_tts
-        comm = edge_tts.Communicate(text, self.voice)
+        comm = edge_tts.Communicate(self._ssml(text), self.voice)
         buf  = bytearray()
         async for chunk in comm.stream():
             if chunk["type"] == "audio":
@@ -427,7 +456,14 @@ class TTSPlayer:
 # ---------------------------------------------------------------------------
 
 def create_tts_player(config: dict) -> TTSPlayer:
-    engine_name = config.get("tts_engine", "edgetts").lower()
+    # Voice Settings (Plugin Settings box) merge in first: a stored rate /
+    # voice applies when the main config does not set one.
+    try:
+        from core import voice_settings as _vs
+        config = _vs.apply_to_config(config)
+    except Exception:
+        pass
+    engine_name = (config or {}).get("tts_engine", "edgetts").lower()
     if engine_name == "kokoro":
         voice  = config.get("tts_voice", "af_heart")
         speed  = float(config.get("tts_speed", 1.0))
@@ -438,5 +474,14 @@ def create_tts_player(config: dict) -> TTSPlayer:
         engine   = ElevenLabsTTSEngine(api_key=api_key, voice_id=voice_id)
     else:   # edgetts (default)
         voice  = config.get("tts_voice", "en-US-GuyNeural")
-        engine = EdgeTTSEngine(voice=voice)
+        try:
+            rate = float(config.get("tts_speed", 1.0))
+        except Exception:
+            rate = 1.0
+        try:
+            from core import voice_settings as _vs
+            pitch = _vs.get_settings().get("pitch", 1.0)
+        except Exception:
+            pitch = 1.0
+        engine = EdgeTTSEngine(voice=voice, rate=rate, pitch=pitch)
     return TTSPlayer(engine)

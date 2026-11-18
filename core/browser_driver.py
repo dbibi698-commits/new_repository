@@ -443,6 +443,142 @@ class Driver:
         except Exception as e:
             return False, f"Screenshot nite parlam na: {e}"
 
+    def fill_form(self, fields: dict, submit_selector: str | None = None) -> tuple[bool, str]:
+        """Fill several fields in order, then optionally click a submit
+        button. `fields` is {selector: text}. DOM backends only — the
+        first field that fails stops the run and the message names it."""
+        try:
+            fields = fields or {}
+            if not isinstance(fields, dict) or not fields:
+                return False, "fill_form-e field dao — {selector: text}."
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            filled = 0
+            for selector, text in fields.items():
+                selector = str(selector or "").strip()
+                if not selector:
+                    return False, "fill_form-e khali selector pelam."
+                try:
+                    self._page.fill(selector, str(text or ""),
+                                  timeout=_STEP_TIMEOUT_MS)
+                except Exception as e:
+                    return False, (f"Field bhorte parlam na ({selector}): "
+                                   f"{e}")
+                filled += 1
+            if submit_selector:
+                ok, msg = self.click(str(submit_selector))
+                if not ok:
+                    return False, f"Submit chapte parlam na: {msg}"
+                return True, (f"Form bhorlam ({filled} ta field) + "
+                              "submit chaplam.")
+            return True, f"Form bhorlam ({filled} ta field)."
+        except Exception as e:
+            return False, f"Form bhorte parlam na: {e}"
+
+    def new_tab(self, url: str | None = None) -> tuple[bool, str]:
+        """Open a new tab (DOM backends only) and make it the current one."""
+        try:
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            if self._context is None:
+                return False, "Browser context pelam na — driver launch koro."
+            page = self._context.new_page()
+            self._page = page
+            count = len(list(self._context.pages or []))
+            if (url or "").strip():
+                ok, msg = self.navigate(str(url).strip())
+                if not ok:
+                    return False, msg
+                return True, f"Notun tab khullam ({count} ta tab): {self.current_url()}"
+            return True, f"Notun tab khullam ({count} ta tab)."
+        except Exception as e:
+            return False, f"Notun tab khulte parlam na: {e}"
+
+    def list_tabs(self) -> tuple[bool, list[dict]]:
+        """All open tabs: [{index, url, title}]. DOM backends only."""
+        try:
+            blocked = self._need_dom()
+            if blocked:
+                return False, []
+            pages = list(self._context.pages or []) if self._context else []
+            out = []
+            for i, p in enumerate(pages):
+                try:
+                    title = str(p.title() or "")
+                except Exception:
+                    title = ""
+                out.append({"index": i,
+                            "url": str(getattr(p, "url", "") or ""),
+                            "title": title,
+                            "current": p is self._page})
+            return True, out
+        except Exception:
+            return False, []
+
+    def switch_tab(self, index: int) -> tuple[bool, str]:
+        """Make tab `index` the current one. DOM backends only."""
+        try:
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            pages = list(self._context.pages or []) if self._context else []
+            idx = int(index)
+            if idx < 0 or idx >= len(pages):
+                return False, (f"Tab {idx} nei — {len(pages)} ta tab khula "
+                               "ache.")
+            self._page = pages[idx]
+            try:
+                self._page.bring_to_front()
+            except Exception:
+                pass
+            return True, f"Tab {idx}-e gelam: {self.current_url()}"
+        except Exception as e:
+            return False, f"Tab bodlate parlam na: {e}"
+
+    def close_tab(self, index: int | None = None) -> tuple[bool, str]:
+        """Close one tab (the current one by default). Refuses to close
+        the LAST tab. DOM backends only."""
+        try:
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            pages = list(self._context.pages or []) if self._context else []
+            if len(pages) <= 1:
+                return False, "Shesh tab-ta bondho korbo na."
+            idx = len(pages) - 1
+            if index is not None:
+                idx = int(index)
+            if idx < 0 or idx >= len(pages):
+                return False, (f"Tab {idx} nei — {len(pages)} ta tab khula "
+                               "ache.")
+            target = pages[idx]
+            was_current = target is self._page
+            target.close()
+            if was_current:
+                rest = list(self._context.pages or [])
+                self._page = rest[0] if rest else None
+            return True, (f"Tab {idx} bondho holo — "
+                          f"{len(list(self._context.pages or []))} ta tab baki.")
+        except Exception as e:
+            return False, f"Tab bondho korte parlam na: {e}"
+
+    def scroll_to_element(self, selector: str) -> tuple[bool, str]:
+        """Scroll so an element is visible. DOM backends only."""
+        try:
+            selector = (selector or "").strip()
+            if not selector:
+                return False, "scroll_to_element-e selector dao."
+            blocked = self._need_dom()
+            if blocked:
+                return blocked
+            self._page.locator(selector).scroll_into_view_if_needed(
+                timeout=_STEP_TIMEOUT_MS)
+            return True, f"Scroll korlam: {selector}"
+        except Exception as e:
+            return False, f"Scroll korte parlam na ({selector}): {e}"
+
     def mouse_move(self, x: int, y: int) -> tuple[bool, str]:
         try:
             if self.backend == BACKEND_PYAUTOGUI:

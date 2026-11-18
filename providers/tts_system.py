@@ -217,6 +217,20 @@ def engine_name() -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 class SystemTTS:
     def __init__(self, cfg: dict):
+        cfg = dict(cfg or {})
+        # Voice Settings box (core/voice_settings.py) is the default when
+        # this provider's own cfg does not set a value: rate (SAPI -10..10),
+        # voice name, and pitch (Linux espeak -p only — SAPI/say have none).
+        try:
+            from core import voice_settings as _vs
+            ov = _vs.tts_cfg_overrides()
+            if not cfg.get("rate"):
+                cfg["rate"] = ov["rate"]
+            if not (cfg.get("voice") or "").strip():
+                cfg["voice"] = ov["voice"]
+            self.pitch = ov["pitch"]
+        except Exception:
+            self.pitch = 1.0
         self.voice = (cfg.get("voice") or "").strip()
         self.rate = int(cfg.get("rate") or 0)        # -10..10 on Windows
         self.caps = dict(DEFAULT_CAPS)
@@ -275,6 +289,13 @@ class SystemTTS:
                 args += ["-v", self.voice]
             if self.rate:
                 args += ["-s", str(max(80, min(450, 175 + self.rate * 15)))]
+            try:
+                from core import voice_settings as _vs
+                pitch = _vs.pitch_as_espeak(getattr(self, "pitch", 1.0))
+            except Exception:
+                pitch = 50
+            if pitch != 50:
+                args += ["-p", str(pitch)]
             r = _run(args)
             if r.returncode != 0:
                 raise RuntimeError(r.stderr.decode("utf-8", "replace")[:200]

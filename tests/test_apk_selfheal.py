@@ -64,6 +64,92 @@ https://dl.google.com/dl/android/maven2/com/example/widget/1.4.2/widget-1.4.2.aa
 * Try: Run with --info for more log output.
 """
 
+LOG_GRADLE_VERSION = """
+> Task :app:assembleDebug FAILED
+Minimum supported Gradle version is 8.5. Current version is 8.0.
+"""
+
+LOG_GRADLE_CLASS_MAJOR = """
+> Task :app:assembleDebug FAILED
+Unsupported class file major version 65
+"""
+
+LOG_KOTLIN_VERSION = """
+> Task :app:compileDebugKotlin FAILED
+The Kotlin Gradle plugin was loaded multiple times.
+Kotlin version 1.9.24 is not compatible with AGP 8.5.2.
+"""
+
+LOG_DEX = """
+> Task :app:mergeDexDebug FAILED
+com.android.dex.DexArchiveMergerException: Cannot fit requested classes in a single dex file.
+The number of method references in a .dex file cannot exceed 64K.
+"""
+
+LOG_RESOURCE = """
+> Task :app:processDebugResources FAILED
+AAPT: error: resource drawable/ic_missing not found.
+error: failed linking references.
+"""
+
+LOG_SDK = """
+> Task :app:assembleDebug FAILED
+SDK location not found. Define location with an ANDROID_HOME environment variable.
+"""
+
+LOG_PLUGIN_NOT_FOUND = """
+> Task :app:assembleDebug FAILED
+Plugin [id: 'com.android.application'] was not found in any of the following sources.
+"""
+
+LOG_SYNTAX_TYPE_MISMATCH = """
+e: app/src/main/java/com/example/MainActivity.kt: (20, 9): Type mismatch: inferred type is String but Int was expected
+> Task :app:compileDebugKotlin FAILED
+"""
+
+LOG_TRANSIENT_429 = """
+> Task :app:assembleDebug FAILED
+Read timed out — https://dl.google.com/dl/android/maven2/com/example/widget/1.4.2/widget-1.4.2.aar
+HTTP 429 Too Many Requests
+"""
+
+WRAPPER_PROPERTIES = (
+    "distributionBase=GRADLE_USER_HOME\n"
+    "distributionPath=wrapper/dists\n"
+    "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.0-bin.zip\n"
+    "zipStoreBase=GRADLE_USER_HOME\n"
+)
+
+VERSION_TOML = '[versions]\n agp = "8.5.2"\n kotlin = "1.9.24"\n'
+
+ROOT_BUILD_KTS = (
+    'plugins {\n'
+    '    id("com.android.application") version "8.5.2"\n'
+    '    id("org.jetbrains.kotlin.android") version "1.9.24"\n'
+    '}\n'
+)
+
+ROOT_BUILD_KTS_NO_VERSION = (
+    'plugins {\n'
+    '    id("com.android.application")\n'
+    '    id("org.jetbrains.kotlin.android")\n'
+    '}\n'
+)
+
+APP_BUILD_KTS = (
+    'plugins {\n'
+    '    id("com.android.application")\n'
+    '}\n\n'
+    'android {\n'
+    '    defaultConfig {\n'
+    '        applicationId = "com.example"\n'
+    '    }\n'
+    '}\n\n'
+    'dependencies {\n'
+    '    implementation("androidx.core:core-ktx:1.13.1")\n'
+    '}\n'
+)
+
 BUILD_GRADLE = (
     'plugins { id "com.android.application" }\n'
     'android { namespace "com.example" }\n'
@@ -494,6 +580,102 @@ class TestPlugins(unittest.TestCase):
         # Missing params → a message, never a raise, never a thread.
         self.assertIn("repo", p1.run({}, player=None))
         self.assertIn("automation_id", p2.run({}, player=None))
+
+
+# ── Gradle / Kotlin classes ────────────────────────────────────────────────
+
+class TestGradleKotlinClasses(unittest.TestCase):
+    def test_new_classes(self):
+        cases = [
+            (LOG_GRADLE_VERSION, "gradle_version", True),
+            (LOG_GRADLE_CLASS_MAJOR, "gradle_version", True),
+            (LOG_KOTLIN_VERSION, "kotlin_version", True),
+            (LOG_DEX, "dex", True),
+            (LOG_RESOURCE, "resource", False),
+            (LOG_SDK, "sdk", False),
+            (LOG_PLUGIN_NOT_FOUND, "dependency", True),
+            (LOG_SYNTAX_TYPE_MISMATCH, "syntax", True),
+            (LOG_TRANSIENT_429, "transient", True),
+        ]
+        for log, want_class, want_fixable in cases:
+            got = apk_selfheal.classify_failure(log)
+            self.assertEqual(got["class"], want_class, log[:60])
+            self.assertEqual(got["auto_fixable"], want_fixable, log[:60])
+
+    def test_gradle_version_bumps_wrapper(self):
+        fake = FakeGitHub(
+            [("failure", LOG_GRADLE_VERSION), ("success", "")],
+            {"gradle/wrapper/gradle-wrapper.properties": WRAPPER_PROPERTIES})
+        res = _run_selfheal(fake)
+        self.assertIn("✅", res, res)
+        self.assertEqual(len(fake.dispatch_calls), 2)
+        self.assertEqual(len(fake.push_calls), 1)
+        path, content, _msg = fake.push_calls[0]
+        self.assertEqual(path, "gradle/wrapper/gradle-wrapper.properties")
+        self.assertIn("gradle-8.5-bin.zip", content)
+        self.assertNotIn("gradle-8.0-bin.zip", content)
+
+    def test_gradle_class_major_maps_to_85(self):
+        fake = FakeGitHub(
+            [("failure", LOG_GRADLE_CLASS_MAJOR), ("success", "")],
+            {"gradle/wrapper/gradle-wrapper.properties": WRAPPER_PROPERTIES})
+        res = _run_selfheal(fake)
+        self.assertIn("✅", res, res)
+        self.assertIn("gradle-8.5-bin.zip", fake.push_calls[0][1])
+
+    def test_kotlin_version_pins_toml(self):
+        fake = FakeGitHub(
+            [("failure", LOG_KOTLIN_VERSION), ("success", "")],
+            {"gradle/libs.versions.toml": VERSION_TOML})
+        res = _run_selfheal(fake)
+        self.assertIn("✅", res, res)
+        self.assertEqual(len(fake.push_calls), 1)
+        path, content, _msg = fake.push_calls[0]
+        self.assertEqual(path, "gradle/libs.versions.toml")
+        self.assertIn('kotlin = "2.0.0"', content)
+        self.assertNotIn('"1.9.24"', content)
+
+    def test_kotlin_version_pins_root_build(self):
+        fake = FakeGitHub(
+            [("failure", LOG_KOTLIN_VERSION), ("success", "")],
+            {"build.gradle.kts": ROOT_BUILD_KTS})
+        res = _run_selfheal(fake)
+        self.assertIn("✅", res, res)
+        path, content, _msg = fake.push_calls[0]
+        self.assertEqual(path, "build.gradle.kts")
+        self.assertIn('version "2.0.0"', content)
+
+    def test_dex_enables_multidex(self):
+        fake = FakeGitHub(
+            [("failure", LOG_DEX), ("success", "")],
+            {"app/build.gradle.kts": APP_BUILD_KTS})
+        res = _run_selfheal(fake)
+        self.assertIn("✅", res, res)
+        path, content, _msg = fake.push_calls[0]
+        self.assertEqual(path, "app/build.gradle.kts")
+        self.assertIn("multiDexEnabled = true", content)
+        self.assertIn("androidx.multidex:multidex:2.0.1", content)
+
+    def test_resource_and_sdk_report_without_push(self):
+        for log in (LOG_RESOURCE, LOG_SDK):
+            fake = FakeGitHub([("failure", log), ("success", "")],
+                              {"app/build.gradle.kts": APP_BUILD_KTS})
+            res = _run_selfheal(fake)
+            self.assertIn("Final: build holo na", res, res)
+            self.assertEqual(len(fake.dispatch_calls), 1)
+            self.assertEqual(len(fake.push_calls), 0)
+
+    def test_plugin_not_found_adds_version(self):
+        fake = FakeGitHub(
+            [("failure", LOG_PLUGIN_NOT_FOUND), ("success", "")],
+            {"build.gradle.kts": ROOT_BUILD_KTS_NO_VERSION})
+        res = _run_selfheal(fake)
+        self.assertIn("✅", res, res)
+        self.assertEqual(len(fake.push_calls), 1)
+        path, content, _msg = fake.push_calls[0]
+        self.assertEqual(path, "build.gradle.kts")
+        self.assertIn('id("com.android.application") version "8.5.2"',
+                      content)
 
 
 if __name__ == "__main__":

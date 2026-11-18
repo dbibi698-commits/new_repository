@@ -85,6 +85,18 @@ def _derive_key(secret: str) -> bytes:
     )
 
 
+def _json_payload(text: str) -> dict:
+    """Parse a relay payload: JSON object wins, anything else becomes
+    {"spec"/"text": raw}. Never raises."""
+    try:
+        data = json.loads(str(text or "").strip())
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
 class JarvisLink:
     """One link between this machine and the phone Jarvis app."""
 
@@ -153,6 +165,14 @@ class JarvisLink:
     def e2e_on(self) -> bool:
         """True when the phone will encrypt its commands to us."""
         return _HAS_AES and bool(self.e2e_secret)
+
+    @e2e_on.setter
+    def e2e_on(self, value: bool) -> None:
+        # False clears the secret (plaintext mode). True cannot invent a
+        # secret — it only keeps the existing one, so e2e_on stays False
+        # until a real pair secret is set.
+        if not value:
+            self.e2e_secret = ""
 
     def _e2e_encrypt(self, plain: str) -> str:
         if not self.e2e_on:
@@ -423,6 +443,115 @@ class JarvisLink:
         return ("⚠️ Phone bollo screen pathiyeche, kintu backend-e notun image "
                 "pelam na — abar try koro.")
 
+    def pc_screen_file(self) -> Path:
+        """Where the latest PC screenshot is saved on this machine."""
+        return _base_dir() / "memory" / "pc_screen.jpg"
+
+    def capture_pc_screen(self) -> str:
+        """Capture THIS PC's own screen with mss and save it to
+        memory/pc_screen.jpg (dashboard: /api/pc-screen). Returns the path
+        as a string, or "" when the capture failed. Never raises.
+
+        The same mss helper the phone uses when it asks for our screen
+        (kind="screen_req" -> _capture_screen_b64) — no duplicate capture
+        code: this writes the JPEG to disk, that one returns base64.
+        """
+        try:
+            import io
+            import mss
+            from PIL import Image
+            with mss.mss() as sct:
+                shot = sct.grab(sct.monitors[1])
+            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+            img.thumbnail((1280, 1280))
+            p = self.pc_screen_file()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            img.save(str(p), format="JPEG", quality=80)
+            return str(p)
+        except Exception:
+            # Fallback: PIL ImageGrab (Windows/macOS) — same JPEG, same path.
+            try:
+                from PIL import ImageGrab
+                img = ImageGrab.grab()
+                img.thumbnail((1280, 1280))
+                p = self.pc_screen_file()
+                p.parent.mkdir(parents=True, exist_ok=True)
+                img.save(str(p), format="JPEG", quality=80)
+                return str(p)
+            except Exception:
+                return ""
+
+    def request_phone_location(self, timeout: float = 30.0) -> str:
+        """Ask the phone for its current location and store the fix.
+
+        HONEST LIMIT (checked 2026-11-17): the phone relay has NO dedicated
+        location request — PcRelay.kt handles text / voice / tts /
+        screen_req / result / clip / file only, and the backend relay
+        allowlist rejects any other kind with 400. So this tries, in order:
+          1. kind="location_req" — the dedicated path, for a future phone
+             app update that handles it (today the backend 400s it, so the
+             send returns False and we move on);
+          2. the REAL existing path — a text command the phone's own AI
+             answers with its get_location tool (ToolExecutor.kt), whose
+             reply carries "Lat …, Lng …" — parsed and stored.
+        Returns a short human string. When no coordinates arrive, the
+        honest string "location unavailable — phone app update needed"
+        (no fix is stored, no coordinates are ever faked). Never raises.
+        """
+        if not self.paired:
+            return "location unavailable — phone pair kora nei."
+        # 1. Dedicated kind (future phone update).
+        try:
+            self._result_event.clear()
+            with self._result_lock:
+                self._last_result = ""
+            if self.send_to_phone("location_req", ""):
+                reply = self.wait_result(timeout)
+                fix = None
+                try:
+                    from core.phone_location import parse_location_text, record_fix
+                    parsed = parse_location_text(reply or "")
+                    if parsed:
+                        fix = record_fix(parsed["lat"], parsed["lon"])
+                except Exception:
+                    fix = None
+                if fix:
+                    return (f"📍 Phone location: {fix['lat']}, {fix['lon']} "
+                            f"({fix.get('at') or ''}) — "
+                            f"https://www.google.com/maps?q={fix['lat']},{fix['lon']}")
+                if reply:
+                    return ("location unavailable — phone location pathay ni "
+                            f"({str(reply)[:120]})")
+        except Exception:
+            pass
+        # 2. Real existing path: phone AI + its get_location tool.
+        try:
+            reply = self.send_and_wait_result(
+                "get_location — amar current location-ta dao: Lat, Lng ar address",
+                timeout=timeout)
+            if not reply:
+                return "location unavailable — phone app update needed"
+            try:
+                from core.phone_location import parse_location_text, record_fix
+                parsed = parse_location_text(reply)
+            except Exception:
+                parsed = None
+            if parsed:
+                fix = record_fix(parsed["lat"], parsed["lon"])
+                if fix:
+                    return (f"📍 Phone location: {fix['lat']}, {fix['lon']} "
+                            f"({fix.get('at') or ''}) — "
+                            f"https://www.google.com/maps?q={fix['lat']},{fix['lon']}")
+            if "permission" in reply.lower() or "Location permission" in reply:
+                return ("location unavailable — phone-e Location permission "
+                        "ON koro (Settings > Permissions > Location).")
+            if "pelam na" in reply or "GPS" in reply:
+                return ("location unavailable — phone-er GPS ON ache kina "
+                        "dekho, tarpor abar bolo.")
+            return "location unavailable — phone app update needed"
+        except Exception:
+            return "location unavailable — phone app update needed"
+
     # ------------------------------------------------------------ loops
 
     def start(self) -> None:
@@ -506,6 +635,34 @@ class JarvisLink:
         audio_file = msg.get("audio_file", "") or ""
         if kind == "text":
             plain = self._e2e_decrypt(text)
+            # Phone-er Commander orders + prefixed fallbacks — the text
+            # path is always allowed by the relay, so these work even if
+            # the backend allowlist has no dedicated kind yet. Everything
+            # goes through the Commander (core/commander.issue_order):
+            # the Commander plans it and delegates to the worker.
+            try:
+                from core import commander as _cmd
+                if _cmd.is_commander_request(plain):
+                    self.send_result(_cmd.handle_phone_request(plain))
+                    return
+                from core import software_builder as _sb
+                if _sb.is_phone_request(plain):
+                    payload = _json_payload(plain[len("SOFTWARE_BUILD::"):])
+                    spec = str(payload.get("spec") or "") or plain
+                    res = _cmd.issue_order(spec, intent="software_build",
+                                           payload=payload)
+                    self.send_result(res.get("result_text", ""))
+                    return
+                from core import python_run as _pr
+                if _pr.is_phone_request(plain):
+                    code = plain[len("PYTHON_RUN::"):]
+                    res = _cmd.issue_order(plain, intent="python_run",
+                                           payload={"code": code})
+                    self.send_result(res.get("result_text", ""))
+                    return
+            except Exception as e:
+                self.send_result(f"Phone-er command chalate parlam na: {e}")
+                return
             self.log(f"[Jarvis Link] 📱 Phone: {plain[:200]}")
             reply = ""
             if self.on_text is not None:
@@ -516,6 +673,81 @@ class JarvisLink:
             if not reply:
                 reply = "✅ Bujhechi — kintu uttor dite parlam na (session connect hoy ni)."
             self.send_result(reply)
+        elif kind == "python_run":
+            # Dedicated kind from the phone (needs the backend relay
+            # allowlist to accept it; the PYTHON_RUN:: text prefix above
+            # is the fallback when it does not). text = the code, plaintext.
+            # Runs through the Commander — Builder worker executes it.
+            try:
+                from core import commander as _cmd
+                res = _cmd.issue_order(text, intent="python_run",
+                                       payload={"code": text})
+                self.send_result(res.get("result_text", ""))
+            except Exception as e:
+                self.send_result(f"Phone-er Python code chalate parlam na: {e}")
+        elif kind == "software_build":
+            # Dedicated kind: text = JSON {spec, kind, deploy, repo} or a
+            # plain spec. Commander → Software Builder → localhost + link.
+            try:
+                from core import commander as _cmd
+                payload = _json_payload(text)
+                spec = str(payload.get("spec") or "") or text
+                res = _cmd.issue_order(spec, intent="software_build",
+                                       payload=payload)
+                self.send_result(res.get("result_text", ""))
+            except Exception as e:
+                self.send_result(f"Phone-er software build korte parlam na: {e}")
+        elif kind == "apk_build":
+            # Dedicated kind: text = JSON {repo, workflow} or "owner/repo".
+            try:
+                from core import commander as _cmd
+                payload = _json_payload(text)
+                repo = str(payload.get("repo") or "") or text
+                res = _cmd.issue_order(repo, intent="apk_build",
+                                       payload=payload)
+                self.send_result(res.get("result_text", ""))
+            except Exception as e:
+                self.send_result(f"Phone-er APK build korte parlam na: {e}")
+        elif kind == "render_deploy":
+            # Dedicated kind: text = JSON {service_id} or a service name.
+            try:
+                from core import commander as _cmd
+                payload = _json_payload(text)
+                order = str(payload.get("service_id") or "") or text or "render deploy"
+                res = _cmd.issue_order(order, intent="render_deploy",
+                                       payload=payload)
+                self.send_result(res.get("result_text", ""))
+            except Exception as e:
+                self.send_result(f"Phone-er Render deploy korte parlam na: {e}")
+        elif kind == "photo_edit":
+            # Dedicated kind: text = JSON {photo, file_id, top_text, size}
+            # or a photo path. Commander → Photo Editor → sheet PNG.
+            # A file_id means the phone sent the photo as a relay file —
+            # download it first, then edit the saved copy.
+            try:
+                from core import commander as _cmd
+                payload = _json_payload(text)
+                file_id = str(payload.get("file_id") or "")
+                if file_id:
+                    data = self._get_bytes("/api/relay/file/" + file_id)
+                    if data:
+                        folder = Path.home() / "Downloads" / "MarkLVII"
+                        try:
+                            folder.mkdir(parents=True, exist_ok=True)
+                        except Exception:
+                            pass
+                        saved = folder / f"phone-photo-{file_id}.png"
+                        try:
+                            saved.write_bytes(data)
+                            payload["photo"] = str(saved)
+                        except Exception:
+                            pass
+                order = str(payload.get("photo") or "") or text
+                res = _cmd.issue_order(order, intent="photo_edit",
+                                       payload=payload)
+                self.send_result(res.get("result_text", ""))
+            except Exception as e:
+                self.send_result(f"Phone-er photo edit korte parlam na: {e}")
         elif kind in ("voice", "tts"):
             if audio_file:
                 data = self._get_bytes("/api/relay/audio/" + audio_file)

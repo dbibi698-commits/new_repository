@@ -1682,6 +1682,12 @@ class PluginSettingsOverlay(QWidget):
     _video_done = pyqtSignal(bool, str)       # video edit finished: ok, message
     _browser_repo_done = pyqtSignal(bool, str)    # browser repo-create finished: ok, message
     _browser_render_done = pyqtSignal(bool, str)  # browser Render deploy finished: ok, message
+    _agent_card_done = pyqtSignal(str, bool, str)  # agent card run finished: card_id, ok, message
+    _python_done = pyqtSignal(str)             # python run finished: result text
+    _sys_done = pyqtSignal(dict)               # system status refresh finished: status dict
+    _sb_done = pyqtSignal(str)                 # software build finished: result text
+    _cmd_done = pyqtSignal(str)                # commander order finished: result text
+    _pe_done = pyqtSignal(str)                 # photo editor finished: result text
     _OW = 460
 
     def __init__(self, sections: list[dict], parent=None):
@@ -1712,6 +1718,58 @@ class PluginSettingsOverlay(QWidget):
         self._video_done.connect(self._on_video_done)
         self._browser_repo_done.connect(self._on_browser_repo_done)
         self._browser_render_done.connect(self._on_browser_render_done)
+        self._agent_card_done.connect(self._on_agent_card_done)
+        self._python_done.connect(self._on_python_done)
+        self._sys_done.connect(self._on_sys_done)
+        self._sb_done.connect(self._on_sb_done)
+        self._cmd_done.connect(self._on_cmd_done)
+        self._pe_done.connect(self._on_pe_done)
+        # Python Run box widgets (built by _build_python_run_box).
+        self._py_code = None
+        self._py_folder = None
+        self._py_out = None
+        self._py_run_btn = None
+        self._py_project_btn = None
+        self._py_lib_field = None
+        self._py_lib_btn = None
+        self._py_list_btn = None
+        # System Status box widgets (built by _build_system_status_box).
+        self._sys_status = None
+        self._sys_autostart_btn = None
+        self._sys_refresh_btn = None
+        # Software Builder box widgets (built by _build_software_builder_box).
+        self._sb_spec = None
+        self._sb_kind = None
+        self._sb_template = None
+        self._sb_deploy = None
+        self._sb_repo = None
+        self._sb_build_btn = None
+        self._sb_servers = None
+        self._sb_out = None
+        # Commander box widgets (built by _build_commander_box).
+        self._cmd_order = None
+        self._cmd_btn = None
+        self._cmd_feed = None
+        # Voice Settings box widgets (built by _build_voice_settings_box).
+        self._vs_rate = None
+        self._vs_rate_lbl = None
+        self._vs_pitch = None
+        self._vs_pitch_lbl = None
+        self._vs_voice = None
+        self._vs_auto = None
+        self._vs_save_btn = None
+        self._vs_out = None
+        # Photo Editor box widgets (built by _build_photo_editor_box).
+        self._pe_photo = None
+        self._pe_size = None
+        self._pe_top = None
+        self._pe_bg = None
+        self._pe_method = None
+        self._pe_sheet_btn = None
+        self._pe_out = None
+        # Agent cards box widgets (built by _build_agent_cards_box).
+        self._agent_cards: dict[str, dict] = {}  # card_id -> {status, btn}
+        self._agent_cards_lay = None
         self._muse_link_built = False   # built once: from a section, or below
         self._muse_status = None
         self._muse_counts = None
@@ -1911,6 +1969,20 @@ class PluginSettingsOverlay(QWidget):
             self._build_browser_repo_box(form)
         if sec.get("widget") == "browser_render":
             self._build_browser_render_box(form)
+        if sec.get("widget") == "agent_cards":
+            self._build_agent_cards_box(form)
+        if sec.get("widget") == "python_run":
+            self._build_python_run_box(form)
+        if sec.get("widget") == "system_status":
+            self._build_system_status_box(form)
+        if sec.get("widget") == "software_builder":
+            self._build_software_builder_box(form)
+        if sec.get("widget") == "commander":
+            self._build_commander_box(form)
+        if sec.get("widget") == "voice_settings":
+            self._build_voice_settings_box(form)
+        if sec.get("widget") == "photo_editor":
+            self._build_photo_editor_box(form)
 
         line = QFrame(); line.setFrameShape(QFrame.Shape.HLine)
         line.setStyleSheet(f"color: {C.BORDER}; margin: 4px 0;")
@@ -2266,6 +2338,970 @@ class PluginSettingsOverlay(QWidget):
         save_plugin_enabled(key, new_val)
         self._style_catalog_toggle(btn, new_val)
 
+
+    # ── Agent cards box (1 Main + 27 workers) ─────────────────────────────
+    def _build_agent_cards_box(self, form: QVBoxLayout):
+        """'🤖 AGENT CARDS' box at the end of the 🤖 AGENT CARDS section.
+
+        One row per card (core/agent_cards.py): icon + name, job line,
+        live readiness line, Run button. Run calls
+        core/agent_cards.run_card on a worker thread; the result comes back
+        through _agent_card_done so only the Qt thread touches widgets.
+        A card never pretends: its Run does its real job, or says plainly
+        what is missing (a token, a pairing, a file).
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🤖  AGENT CARDS — 1 Main + 27 workers",
+                                 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Run chapo — prottek card asol kaj korbe, na parle ki lagbe "
+            "bole dibe. Card-er kaj: video upload, APK build, Render deploy, "
+            "browser, Firebase, hosting auto-fix, WhatsApp, live screen…",
+            8, color=C.TEXT_DIM))
+
+        refresh_btn = QPushButton("🔄  REFRESH STATUS")
+        refresh_btn.setFixedHeight(28)
+        refresh_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        refresh_btn.clicked.connect(self._refresh_agent_cards)
+        form.addWidget(refresh_btn)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(0, 0, 6, 0)
+        lay.setSpacing(4)
+        lay.addStretch()
+        scroll.setWidget(inner)
+        scroll.setFixedHeight(260)
+        form.addWidget(scroll, 1)
+        self._agent_cards_lay = lay
+        self._refresh_agent_cards()
+
+    def _refresh_agent_cards(self):
+        """Rebuild the card rows from core.agent_cards.cards() (Qt thread)."""
+        if self._agent_cards_lay is None:
+            return
+        try:
+            from core import agent_cards as _ac
+            cards = _ac.cards()
+        except Exception:
+            cards = []
+        lay = self._agent_cards_lay
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._agent_cards = {}
+        if not cards:
+            empty = self._lbl("Agent card gulo pelam na — registry porte parini.",
+                              8, color=C.TEXT_DIM)
+            lay.addWidget(empty)
+            lay.addStretch()
+            return
+        for c in cards:
+            lay.addWidget(self._build_agent_card_row(c))
+        lay.addStretch()
+
+    def _build_agent_card_row(self, card: dict) -> QFrame:
+        cid = str(card.get("id") or "")
+        frame = QFrame()
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: {C.PANEL2};
+                border: 1px solid {C.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+        flay = QVBoxLayout(frame)
+        flay.setContentsMargins(10, 6, 10, 6)
+        flay.setSpacing(2)
+
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        name = QLabel(f"{card.get('icon', '')}  {card.get('name', '?')}")
+        name.setFont(hud_font(9, QFont.Weight.Bold))
+        name.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        top.addWidget(name)
+        top.addStretch()
+        run_btn = QPushButton("▶  RUN")
+        run_btn.setFixedSize(64, 24)
+        run_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        run_btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            QPushButton:disabled {{ color: {C.BORDER}; border-color: {C.BORDER}; }}
+        """)
+        run_btn.clicked.connect(
+            lambda _c=False, _id=cid: self._on_agent_card_run(_id))
+        top.addWidget(run_btn)
+        flay.addLayout(top)
+
+        job = QLabel(str(card.get("job") or ""))
+        job.setFont(hud_font(8))
+        job.setWordWrap(True)
+        job.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        flay.addWidget(job)
+
+        ready = bool(card.get("ready"))
+        missing = str(card.get("missing") or "")
+        status = QLabel("✅ Ready" if ready else
+                        f"⚠️ {missing}" if missing else
+                        f"⚠️ Needs: {card.get('needs', '')}")
+        status.setFont(hud_font(8))
+        status.setWordWrap(True)
+        status.setStyleSheet(
+            f"color: {C.PRI if ready else '#ffbf47'}; background: transparent;")
+        flay.addWidget(status)
+
+        self._agent_cards[cid] = {"status": status, "btn": run_btn}
+        return frame
+
+    def _on_agent_card_run(self, card_id: str):
+        row = self._agent_cards.get(card_id)
+        if row is None:
+            return
+        row["btn"].setEnabled(False)
+        row["status"].setText("⏳ Cholche…")
+        row["status"].setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+
+        def worker():
+            try:
+                from core import agent_cards as _ac
+                msg = _ac.run_card(card_id)
+                ok = not str(msg or "").startswith(("❌", "⚠️", "📱 Phone pair",
+                                                    "GitHub token", "Render API"))
+            except Exception as e:
+                msg, ok = f"Card chalate parlam na: {e}", False
+            self._agent_card_done.emit(card_id, bool(ok), str(msg)[:600])
+
+        threading.Thread(target=worker, daemon=True,
+                         name=f"agent-card-{card_id}").start()
+
+    def _on_agent_card_done(self, card_id: str, ok: bool, msg: str):
+        row = self._agent_cards.get(card_id)
+        if row is None:
+            return
+        row["btn"].setEnabled(True)
+        first = (str(msg or "").strip().splitlines() or [""])[0][:200]
+        row["status"].setText(first or ("✅ Hoye geche." if ok else "⚠️ Hoy ni."))
+        color = C.PRI if ok else "#ff6b6b"
+        row["status"].setStyleSheet(
+            f"color: {color}; background: transparent;")
+
+    # ── Python Run box (🐍 RUN PYTHON) ─────────────────────────────────────
+    def _build_python_run_box(self, form: QVBoxLayout):
+        """'🐍 RUN PYTHON' box at the end of the 🐍 RUN PYTHON section.
+
+        Code area + Run Snippet button, project folder field + Run Project
+        button, and a read-only output label. The code runs on a worker
+        thread (core/python_run.py — 60 s default, output capped); the
+        result comes back through _python_done so only the Qt thread
+        touches widgets.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🐍  RUN PYTHON — code likhe chalao",
+                                 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Python code ekhane likhe chalao — ei PC-r Python diye cholbe "
+            "(60 s default, output kata). Boro project hole folder-er path "
+            "dao — venv + requirements install kore main.py chalabe.",
+            8, color=C.TEXT_DIM))
+
+        self._py_code = QTextEdit()
+        self._py_code.setPlaceholderText('print("Hello Mark")')
+        self._py_code.setFont(mono_font(10))
+        self._py_code.setFixedHeight(110)
+        self._py_code.setStyleSheet(self._fs.replace("QLineEdit", "QTextEdit"))
+        form.addWidget(self._py_code)
+
+        _row = QHBoxLayout(); _row.setSpacing(6)
+        self._py_run_btn = QPushButton("▶  RUN SNIPPET")
+        self._py_run_btn.setFixedHeight(30)
+        self._py_run_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        self._py_run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._py_run_btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        self._py_run_btn.clicked.connect(self._on_python_run)
+        _row.addWidget(self._py_run_btn)
+        _wrap = QWidget(); _wrap.setLayout(_row)
+        form.addWidget(_wrap)
+
+        form.addWidget(self._lbl("PROJECT FOLDER (project run-er jonno)",
+                                 8, color=C.TEXT_DIM))
+        self._py_folder = QLineEdit()
+        self._py_folder.setPlaceholderText(r"C:\Users\...\my-project")
+        self._py_folder.setFont(hud_font(10))
+        self._py_folder.setFixedHeight(30)
+        self._py_folder.setStyleSheet(self._fs)
+        form.addWidget(self._py_folder)
+
+        self._py_project_btn = QPushButton("📁  RUN PROJECT (main.py)")
+        self._py_project_btn.setFixedHeight(30)
+        self._py_project_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        self._py_project_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._py_project_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        self._py_project_btn.clicked.connect(self._on_python_run_project)
+        form.addWidget(self._py_project_btn)
+
+        self._py_out = QTextEdit()
+        self._py_out.setReadOnly(True)
+        self._py_out.setFont(mono_font(9))
+        self._py_out.setFixedHeight(120)
+        self._py_out.setStyleSheet(self._fs.replace("QLineEdit", "QTextEdit"))
+        form.addWidget(self._py_out)
+
+        # ── Libraries (advanced round) ───────────────────────────────────
+        form.addSpacing(4)
+        form.addWidget(self._lbl("📦  LIBRARIES — ek click-e install",
+                                 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Common library install koro (internet lagbe) ba install kora "
+            "package-er list dekho. Project-er requirements.txt auto-install "
+            "hoy project run-er somoy.",
+            8, color=C.TEXT_DIM))
+        self._py_lib_field = QLineEdit()
+        self._py_lib_field.setPlaceholderText("requests / flask / pandas …")
+        self._py_lib_field.setFont(hud_font(10))
+        self._py_lib_field.setFixedHeight(30)
+        self._py_lib_field.setStyleSheet(self._fs)
+        form.addWidget(self._py_lib_field)
+        _lib_row = QHBoxLayout(); _lib_row.setSpacing(6)
+        self._py_lib_btn = QPushButton("📦  INSTALL")
+        self._py_lib_btn.setFixedHeight(30)
+        self._py_lib_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        self._py_lib_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._py_lib_btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        self._py_lib_btn.clicked.connect(self._on_python_install_lib)
+        _lib_row.addWidget(self._py_lib_btn)
+        self._py_list_btn = QPushButton("📋  LIBRARIES DEKHO")
+        self._py_list_btn.setFixedHeight(30)
+        self._py_list_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        self._py_list_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._py_list_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        self._py_list_btn.clicked.connect(self._on_python_list_libs)
+        _lib_row.addWidget(self._py_list_btn)
+        _lib_wrap = QWidget(); _lib_wrap.setLayout(_lib_row)
+        form.addWidget(_lib_wrap)
+
+    def _on_python_run(self):
+        code = (self._py_code.toPlainText() or "").strip() if self._py_code else ""
+        if not code:
+            if self._py_out is not None:
+                self._py_out.setPlainText("Code dao — khali snippet chalate parbo na.")
+            return
+        self._py_run_btn.setEnabled(False)
+        if self._py_out is not None:
+            self._py_out.setPlainText("⏳ Cholche…")
+
+        def worker():
+            try:
+                from core import python_run as _pr
+                msg = _pr.run_snippet_text(code)
+            except Exception as e:
+                msg = f"Python run korte parlam na: {e}"
+            self._python_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="python-run-snippet").start()
+
+    def _on_python_run_project(self):
+        folder = (self._py_folder.text() or "").strip() if self._py_folder else ""
+        if not folder:
+            if self._py_out is not None:
+                self._py_out.setPlainText(
+                    "Project folder-er path dao — kothay chalabo?")
+            return
+        self._py_project_btn.setEnabled(False)
+        if self._py_out is not None:
+            self._py_out.setPlainText("⏳ Project cholche… (venv + requirements lagte pare)")
+
+        def worker():
+            try:
+                from core import python_run as _pr
+                msg = _pr.run_project(folder)
+            except Exception as e:
+                msg = f"Project chalate parlam na: {e}"
+            self._python_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="python-run-project").start()
+
+    def _on_python_done(self, msg: str):
+        if self._py_run_btn is not None:
+            self._py_run_btn.setEnabled(True)
+        if self._py_project_btn is not None:
+            self._py_project_btn.setEnabled(True)
+        if self._py_lib_btn is not None:
+            self._py_lib_btn.setEnabled(True)
+        if self._py_list_btn is not None:
+            self._py_list_btn.setEnabled(True)
+        if self._py_out is not None:
+            self._py_out.setPlainText(msg or "Kichu uttor elo na.")
+
+    def _on_python_list_libs(self):
+        if self._py_list_btn is not None:
+            self._py_list_btn.setEnabled(False)
+        if self._py_out is not None:
+            self._py_out.setPlainText("⏳ Libraries dekhchi…")
+
+        def worker():
+            try:
+                from core import python_run as _pr
+                msg = _pr.libraries_text()
+            except Exception as e:
+                msg = f"Libraries dekhte parlam na: {e}"
+            self._python_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="python-list-libs").start()
+
+    def _on_python_install_lib(self):
+        name = (self._py_lib_field.text() or "").strip() \
+            if self._py_lib_field else ""
+        if not name:
+            if self._py_out is not None:
+                self._py_out.setPlainText(
+                    "Library-r naam dao (jemon 'requests').")
+            return
+        if self._py_lib_btn is not None:
+            self._py_lib_btn.setEnabled(False)
+        if self._py_out is not None:
+            self._py_out.setPlainText(f"⏳ '{name}' install korchi… (internet lagbe)")
+
+        def worker():
+            try:
+                from core import python_run as _pr
+                _ok, note = _pr.install_library(name)
+                msg = note
+            except Exception as e:
+                msg = f"Library install korte parlam na: {e}"
+            self._python_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="python-install-lib").start()
+
+    # ── System Status box (🖥️ SYSTEM STATUS) ───────────────────────────────
+    def _build_system_status_box(self, form: QVBoxLayout):
+        """'🖥️ SYSTEM STATUS' box at the end of the 🖥️ SYSTEM STATUS
+        section: true detected state (autostart, Python, Chrome,
+        Playwright, Java/Gradle) + Refresh + the Windows autostart toggle.
+        The probe and the toggle run on a worker thread; results come back
+        through _sys_done so only the Qt thread touches widgets.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl(
+            "🖥️  SYSTEM STATUS — autostart, Python, Chrome, Java/Gradle",
+            10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Ei PC-r asol obostha — kichu onuman noy. Autostart mane "
+            "Windows Startup folder-er shortcut; Java/Gradle na thakle "
+            "local Gradle build hobe na (GitHub Actions path cholbe).",
+            8, color=C.TEXT_DIM))
+
+        self._sys_status = self._lbl("Status anchi…", 8, color=C.TEXT_DIM)
+        self._sys_status.setWordWrap(True)
+        form.addWidget(self._sys_status)
+
+        _row = QHBoxLayout(); _row.setSpacing(6)
+        self._sys_refresh_btn = QPushButton("🔄  REFRESH")
+        self._sys_refresh_btn.setFixedHeight(28)
+        self._sys_refresh_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        self._sys_refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sys_refresh_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        self._sys_refresh_btn.clicked.connect(self._on_sys_refresh)
+        _row.addWidget(self._sys_refresh_btn)
+        self._sys_autostart_btn = QPushButton("⚡  AUTOSTART: …")
+        self._sys_autostart_btn.setFixedHeight(28)
+        self._sys_autostart_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        self._sys_autostart_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sys_autostart_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        self._sys_autostart_btn.clicked.connect(self._on_autostart_toggle)
+        _row.addWidget(self._sys_autostart_btn)
+        _wrap = QWidget(); _wrap.setLayout(_row)
+        form.addWidget(_wrap)
+        self._on_sys_refresh()
+
+    def _on_sys_refresh(self):
+        if self._sys_status is not None:
+            self._sys_status.setText("Status anchi…")
+
+        def worker():
+            try:
+                from core import autostart as _as
+                st = _as.environment_status()
+                st["_lines"] = _as.environment_lines()
+            except Exception as e:
+                st = {"autostart": False, "_lines": f"Status dekhte parlam na: {e}"}
+            self._sys_done.emit(dict(st))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="system-status-refresh").start()
+
+    def _on_sys_done(self, st: dict):
+        if self._sys_status is not None:
+            self._sys_status.setText(str(st.get("_lines", "")))
+        if self._sys_autostart_btn is not None:
+            on = bool(st.get("autostart"))
+            self._sys_autostart_btn.setText(
+                "⚡  AUTOSTART: ON — OFF koro" if on
+                else "⚡  AUTOSTART: OFF — ON koro")
+            self._sys_autostart_btn.setProperty("autostart_on", on)
+            self._sys_autostart_btn.setEnabled(True)
+
+    def _on_autostart_toggle(self):
+        btn = self._sys_autostart_btn
+        if btn is None:
+            return
+        want_on = not bool(btn.property("autostart_on"))
+        btn.setEnabled(False)
+        btn.setText("⏳ …")
+
+        def worker():
+            try:
+                from core import autostart as _as
+                ok, msg = _as.set_autostart(want_on)
+            except Exception as e:
+                ok, msg = False, f"Autostart bodlate parlam na: {e}"
+            # Refresh the whole status box so the toggle + lines agree.
+            try:
+                from core import autostart as _as2
+                st = _as2.environment_status()
+                st["_lines"] = _as2.environment_lines()
+                if not ok:
+                    st["_lines"] += f"\n{msg}"
+            except Exception:
+                st = {"autostart": False, "_lines": msg}
+            self._sys_done.emit(dict(st))
+            # (The button is re-enabled on the Qt thread in _on_sys_done.)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="autostart-toggle").start()
+
+    # ── Software Builder box (🛠️ SOFTWARE BUILDER) ──────────────────────────
+    def _build_software_builder_box(self, form: QVBoxLayout):
+        """'🛠️ SOFTWARE BUILDER' box: spec + kind + deploy + Build & Run.
+
+        The build runs on a worker thread (core/software_builder.py —
+        build → test → localhost run → fix loop max 3); the result comes
+        back through _sb_done so only the Qt thread touches widgets.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🛠️  SOFTWARE BUILDER — boro software banao",
+                                 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Ki banate chao likho — Mark full project likhe, test kore, "
+            "localhost-e chalabe (Chrome-e khulbe), vul hole nije thik kore "
+            "abar chalabe (max 3 bar). Deploy tick dile Render-e uthbe.",
+            8, color=C.TEXT_DIM))
+
+        form.addWidget(self._lbl("KI BANABO (SPEC)", 8, color=C.TEXT_DIM))
+        self._sb_spec = QLineEdit()
+        self._sb_spec.setPlaceholderText("ekta todo dashboard banao")
+        self._sb_spec.setFont(hud_font(10))
+        self._sb_spec.setFixedHeight(30)
+        self._sb_spec.setStyleSheet(self._fs)
+        form.addWidget(self._sb_spec)
+
+        _row = QHBoxLayout(); _row.setSpacing(6)
+        self._sb_kind = QComboBox()
+        self._sb_kind.addItems(["Auto", "Web / Dashboard", "Desktop app", "Tool"])
+        self._sb_kind.setFont(hud_font(9))
+        self._sb_kind.setFixedHeight(30)
+        self._sb_kind.setStyleSheet(
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 8px; }}")
+        _row.addWidget(self._sb_kind)
+        self._sb_deploy = QCheckBox("🚀 Render-e deploy koro")
+        self._sb_deploy.setFont(hud_font(9))
+        _row.addWidget(self._sb_deploy)
+        _wrap = QWidget(); _wrap.setLayout(_row)
+        form.addWidget(_wrap)
+
+        form.addWidget(self._lbl("TEMPLATE (boro project-er jonno)",
+                                 8, color=C.TEXT_DIM))
+        self._sb_template = QComboBox()
+        self._sb_template.addItems([
+            "Auto (spec dekhe)", "Flask Dashboard", "FastAPI + SQLite API",
+            "PyQt Desktop App", "Static HTML Site", "Telegram Bot",
+            "File Organizer"])
+        self._sb_template.setFont(hud_font(9))
+        self._sb_template.setFixedHeight(30)
+        self._sb_template.setStyleSheet(
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 8px; }}")
+        form.addWidget(self._sb_template)
+
+        form.addWidget(self._lbl("REPO (deploy-er jonno, owner/name)",
+                                 8, color=C.TEXT_DIM))
+        self._sb_repo = QLineEdit()
+        self._sb_repo.setPlaceholderText("dbibi698-commits/my-app")
+        self._sb_repo.setFont(hud_font(10))
+        self._sb_repo.setFixedHeight(30)
+        self._sb_repo.setStyleSheet(self._fs)
+        form.addWidget(self._sb_repo)
+
+        self._sb_build_btn = QPushButton("🛠️  BUILD & RUN ON LOCALHOST")
+        self._sb_build_btn.setFixedHeight(30)
+        self._sb_build_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        self._sb_build_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sb_build_btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        self._sb_build_btn.clicked.connect(self._on_sb_build)
+        form.addWidget(self._sb_build_btn)
+
+        self._sb_servers = self._lbl("🌐 Localhost server: ekhono kono server cholche na.",
+                                     8, color=C.TEXT_DIM)
+        form.addWidget(self._sb_servers)
+
+        self._sb_out = QTextEdit()
+        self._sb_out.setReadOnly(True)
+        self._sb_out.setFont(mono_font(9))
+        self._sb_out.setFixedHeight(120)
+        self._sb_out.setStyleSheet(self._fs.replace("QLineEdit", "QTextEdit"))
+        form.addWidget(self._sb_out)
+
+    def _on_sb_build(self):
+        spec = (self._sb_spec.text() or "").strip() if self._sb_spec else ""
+        if not spec:
+            if self._sb_out is not None:
+                self._sb_out.setPlainText("Ki banabo — spec dao.")
+            return
+        kind = ""
+        if self._sb_kind is not None:
+            kind = {"Auto": "", "Web / Dashboard": "web",
+                    "Desktop app": "desktop", "Tool": "tool"}.get(
+                        self._sb_kind.currentText(), "")
+        template = ""
+        if self._sb_template is not None:
+            template = {"Auto (spec dekhe)": "",
+                        "Flask Dashboard": "flask_dashboard",
+                        "FastAPI + SQLite API": "fastapi_sqlite",
+                        "PyQt Desktop App": "pyqt_desktop",
+                        "Static HTML Site": "static_site",
+                        "Telegram Bot": "telegram_bot",
+                        "File Organizer": "file_organizer"}.get(
+                            self._sb_template.currentText(), "")
+        deploy = bool(self._sb_deploy.isChecked()) if self._sb_deploy else False
+        repo = (self._sb_repo.text() or "").strip() if self._sb_repo else ""
+        self._sb_build_btn.setEnabled(False)
+        if self._sb_out is not None:
+            self._sb_out.setPlainText("⏳ Banacchi… (likhchi, test korchi, localhost-e chalacchi)")
+
+        def worker():
+            try:
+                from core import software_builder as _sb
+                msg = _sb.build_and_run_text(spec, kind=kind,
+                                             template=template, deploy=deploy,
+                                             repo=repo, open_browser=True)
+            except Exception as e:
+                msg = f"Software build korte parlam na: {e}"
+            self._sb_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="software-builder-build").start()
+
+    def _on_sb_done(self, msg: str):
+        if self._sb_build_btn is not None:
+            self._sb_build_btn.setEnabled(True)
+        if self._sb_out is not None:
+            self._sb_out.setPlainText(msg or "Kichu uttor elo na.")
+        if self._sb_servers is not None:
+            try:
+                from core import software_builder as _sb
+                servers = _sb.list_servers()
+                if servers:
+                    self._sb_servers.setText(
+                        "🌐 " + " | ".join(
+                            f"{s.get('project', '')}: {s.get('url', '')}"
+                            for s in servers))
+                else:
+                    self._sb_servers.setText(
+                        "🌐 Localhost server: ekhono kono server cholche na.")
+            except Exception:
+                pass
+
+    # ── Commander box (🎖️ COMMANDER) ─────────────────────────────────────────
+    def _build_commander_box(self, form: QVBoxLayout):
+        """'🎖️ COMMANDER' box: order field + live feed.
+
+        The order runs on a worker thread (core/commander.issue_order —
+        plan → delegate → track → report); the result comes back through
+        _cmd_done. The live feed below shows the same text the master
+        screen's Commander panel shows (current order → plan → workers →
+        result → log) and refreshes on every order + on Refresh.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🎖️  COMMANDER — order dao, Mark worker-ke pathabe",
+                                 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Commander (Mark nije) order-ta plan korbe, thik worker-ke dibe, "
+            "live dekhabe ke ki korche, ar sheshe result janabe.",
+            8, color=C.TEXT_DIM))
+
+        self._cmd_order = QLineEdit()
+        self._cmd_order.setPlaceholderText("ekta todo dashboard banao")
+        self._cmd_order.setFont(hud_font(10))
+        self._cmd_order.setFixedHeight(30)
+        self._cmd_order.setStyleSheet(self._fs)
+        self._cmd_order.returnPressed.connect(self._on_cmd_order)
+        form.addWidget(self._cmd_order)
+
+        self._cmd_btn = QPushButton("🎖️  ORDER DAO")
+        self._cmd_btn.setFixedHeight(30)
+        self._cmd_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        self._cmd_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cmd_btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        self._cmd_btn.clicked.connect(self._on_cmd_order)
+        form.addWidget(self._cmd_btn)
+
+        _row = QHBoxLayout()
+        self._cmd_feed = QTextEdit()
+        self._cmd_feed.setReadOnly(True)
+        self._cmd_feed.setFont(mono_font(9))
+        self._cmd_feed.setFixedHeight(160)
+        self._cmd_feed.setStyleSheet(self._fs.replace("QLineEdit", "QTextEdit"))
+        _row.addWidget(self._cmd_feed)
+        _wrap = QWidget(); _wrap.setLayout(_row)
+        form.addWidget(_wrap)
+        refresh = QPushButton("🔄  FEED REFRESH")
+        refresh.setFixedHeight(28)
+        refresh.setFont(hud_font(8, QFont.Weight.Bold))
+        refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+        """)
+        refresh.clicked.connect(self._on_cmd_refresh)
+        form.addWidget(refresh)
+        self._on_cmd_refresh()
+
+    def _on_cmd_order(self):
+        order = (self._cmd_order.text() or "").strip() if self._cmd_order else ""
+        if not order:
+            if self._cmd_feed is not None:
+                self._cmd_feed.setPlainText("Commander-ke order dao — ki korte hobe bolo.")
+            return
+        self._cmd_btn.setEnabled(False)
+        if self._cmd_feed is not None:
+            self._cmd_feed.setPlainText("🎖️ Commander plan korche…")
+
+        def worker():
+            try:
+                from core import commander as _cmd
+                res = _cmd.issue_order(order)
+                msg = res.get("result_text", "")
+            except Exception as e:
+                msg = f"Commander order nite parlam na: {e}"
+            self._cmd_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="commander-order").start()
+
+    def _on_cmd_done(self, msg: str):
+        if self._cmd_btn is not None:
+            self._cmd_btn.setEnabled(True)
+        self._on_cmd_refresh()
+        if self._cmd_feed is not None and msg:
+            cur = self._cmd_feed.toPlainText() or ""
+            self._cmd_feed.setPlainText((cur + "\n" + msg)[:4000])
+
+    def _on_cmd_refresh(self):
+        if self._cmd_feed is None:
+            return
+        try:
+            from core import commander as _cmd
+            self._cmd_feed.setPlainText(_cmd.status_text())
+        except Exception as e:
+            self._cmd_feed.setPlainText(f"Commander feed dekhte parlam na: {e}")
+
+    # ── Voice Settings box (🎙️ VOICE SETTINGS) ──────────────────────────────
+    def _build_voice_settings_box(self, form: QVBoxLayout):
+        """'🎙️ VOICE SETTINGS' box: rate + pitch sliders, voice name,
+        auto-reply voice toggle, Save.
+
+        These settings cover the LOCAL TTS fallback (system TTS, Piper,
+        EdgeTTS, Kokoro) — Gemini Live is the main voice and the box says
+        so. Saving is a small config write, so it runs on the Qt thread
+        directly (no worker thread needed).
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🎙️  VOICE SETTINGS — kotha kemon shonabe",
+                                 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Gemini Live-i main voice; ei setting local TTS fallback-er "
+            "jonno (system TTS / Piper / EdgeTTS / Kokoro). Rate sob "
+            "platform-e kaj kore; pitch Linux (espeak) + EdgeTTS-e kaj kore.",
+            8, color=C.TEXT_DIM))
+        try:
+            from core import voice_settings as _vs
+            cur = _vs.get_settings()
+        except Exception:
+            cur = {"rate": 1.0, "pitch": 1.0, "voice": "",
+                   "auto_reply_voice": True}
+
+        self._vs_rate_lbl = self._lbl(
+            f"Speed / rate: {float(cur.get('rate', 1.0)):.2f}x",
+            8, color=C.TEXT_DIM)
+        form.addWidget(self._vs_rate_lbl)
+        self._vs_rate = QSlider(Qt.Orientation.Horizontal)
+        self._vs_rate.setMinimum(50)
+        self._vs_rate.setMaximum(200)
+        self._vs_rate.setValue(int(float(cur.get("rate", 1.0)) * 100))
+        self._vs_rate.valueChanged.connect(self._on_vs_slider)
+        form.addWidget(self._vs_rate)
+
+        self._vs_pitch_lbl = self._lbl(
+            f"Pitch: {float(cur.get('pitch', 1.0)):.2f}x",
+            8, color=C.TEXT_DIM)
+        form.addWidget(self._vs_pitch_lbl)
+        self._vs_pitch = QSlider(Qt.Orientation.Horizontal)
+        self._vs_pitch.setMinimum(50)
+        self._vs_pitch.setMaximum(200)
+        self._vs_pitch.setValue(int(float(cur.get("pitch", 1.0)) * 100))
+        self._vs_pitch.valueChanged.connect(self._on_vs_slider)
+        form.addWidget(self._vs_pitch)
+
+        form.addWidget(self._lbl("VOICE (system voice-er naam, khali = default)",
+                                 8, color=C.TEXT_DIM))
+        self._vs_voice = QLineEdit()
+        self._vs_voice.setText(str(cur.get("voice") or ""))
+        self._vs_voice.setPlaceholderText("e.g. Microsoft Zira Desktop")
+        self._vs_voice.setFont(hud_font(10))
+        self._vs_voice.setFixedHeight(30)
+        self._vs_voice.setStyleSheet(self._fs)
+        form.addWidget(self._vs_voice)
+
+        self._vs_auto = QCheckBox(
+            "📱 Phone-e voice reply (auto voice) — OFF hole sudhu text jabe")
+        self._vs_auto.setChecked(bool(cur.get("auto_reply_voice", True)))
+        self._vs_auto.setFont(hud_font(9))
+        form.addWidget(self._vs_auto)
+
+        self._vs_save_btn = QPushButton("💾  VOICE SETTINGS SAVE KORO")
+        self._vs_save_btn.setFixedHeight(30)
+        self._vs_save_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        self._vs_save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._vs_save_btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        self._vs_save_btn.clicked.connect(self._on_vs_save)
+        form.addWidget(self._vs_save_btn)
+
+        self._vs_out = self._lbl("", 8, color=C.TEXT_DIM)
+        form.addWidget(self._vs_out)
+
+    def _on_vs_slider(self):
+        if self._vs_rate_lbl is not None and self._vs_rate is not None:
+            self._vs_rate_lbl.setText(
+                f"Speed / rate: {self._vs_rate.value() / 100:.2f}x")
+        if self._vs_pitch_lbl is not None and self._vs_pitch is not None:
+            self._vs_pitch_lbl.setText(
+                f"Pitch: {self._vs_pitch.value() / 100:.2f}x")
+
+    def _on_vs_save(self):
+        try:
+            from core import voice_settings as _vs
+            rate = (self._vs_rate.value() / 100.0) \
+                if self._vs_rate is not None else None
+            pitch = (self._vs_pitch.value() / 100.0) \
+                if self._vs_pitch is not None else None
+            voice = (self._vs_voice.text() or "").strip() \
+                if self._vs_voice is not None else None
+            arv = bool(self._vs_auto.isChecked()) \
+                if self._vs_auto is not None else None
+            _vs.set_settings(rate=rate, pitch=pitch, voice=voice,
+                             auto_reply_voice=arv)
+            msg = ("✅ Voice Settings save holo — rate "
+                   f"{rate:.2f}x, pitch {pitch:.2f}x, voice "
+                   f"'{voice or 'default'}', phone voice reply "
+                   f"{'ON' if arv else 'OFF'}.")
+        except Exception as e:
+            msg = f"Voice Settings save holo na: {e}"
+        if self._vs_out is not None:
+            self._vs_out.setText(msg)
+
+    # ── Photo Editor box (🖼️ PHOTO EDITOR) ───────────────────────────────────
+    _PE_SIZES = ["1.2 x 1.4 inch (default)", "2 x 2 inch passport", "35 x 45 mm"]
+    _PE_SIZE_IDS = ["1.2x1.4", "2x2", "35x45mm"]
+
+    def _build_photo_editor_box(self, form: QVBoxLayout):
+        """'🖼️ PHOTO EDITOR' box: photo picker + size picker + top-line
+        text + 6-copy A4 sheet button.
+
+        The sheet builds on a worker thread (core/photo_editor.py —
+        background remove → border → 2480x3508 px A4 PNG); the result
+        comes back through _pe_done so only the Qt thread touches
+        widgets. The method label says plainly whether rembg or the
+        OpenCV GrabCut fallback ran (rembg needs internet on first use
+        for the ~170 MB u2net model).
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl("🖼️  PHOTO EDITOR — 6-copy A4 sheet + edit",
+                                 10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Ekta photo theke background remove kore, border diye, 6 copy "
+            "A4 sheet banabe (proti copy 360x420 px — 1.2x1.4 inch, 300 DPI), "
+            "uporer line-e tomar text. Print-ready PNG (PDF noy).",
+            8, color=C.TEXT_DIM))
+
+        _row = QHBoxLayout(); _row.setSpacing(6)
+        self._pe_photo = QLineEdit()
+        self._pe_photo.setPlaceholderText("Photo-r path — Browse chapo")
+        self._pe_photo.setFont(hud_font(10))
+        self._pe_photo.setFixedHeight(30)
+        self._pe_photo.setStyleSheet(self._fs)
+        _row.addWidget(self._pe_photo, 1)
+        browse = QPushButton("📂  BROWSE")
+        browse.setFixedHeight(30)
+        browse.setFont(hud_font(8, QFont.Weight.Bold))
+        browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        browse.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+        """)
+        browse.clicked.connect(self._on_pe_browse)
+        _row.addWidget(browse)
+        _wrap = QWidget(); _wrap.setLayout(_row)
+        form.addWidget(_wrap)
+
+        form.addWidget(self._lbl("COPY SIZE (picker)", 8, color=C.TEXT_DIM))
+        self._pe_size = QComboBox()
+        self._pe_size.addItems(self._PE_SIZES)
+        self._pe_size.setFont(hud_font(9))
+        self._pe_size.setFixedHeight(30)
+        self._pe_size.setStyleSheet(
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 8px; }}")
+        form.addWidget(self._pe_size)
+
+        form.addWidget(self._lbl("UPORER LINE-ER TEXT (sheet-er top-e)",
+                                 8, color=C.TEXT_DIM))
+        self._pe_top = QLineEdit()
+        self._pe_top.setPlaceholderText("jemon: AMAR PHOTO (khali rakhle kono text thakbe na)")
+        self._pe_top.setFont(hud_font(10))
+        self._pe_top.setFixedHeight(30)
+        self._pe_top.setStyleSheet(self._fs)
+        form.addWidget(self._pe_top)
+
+        self._pe_bg = QCheckBox("Background remove koro (rembg, na thakle OpenCV GrabCut)")
+        self._pe_bg.setChecked(True)
+        self._pe_bg.setFont(hud_font(9))
+        form.addWidget(self._pe_bg)
+
+        self._pe_method = self._lbl(
+            "Background remove: rembg thakle rembg, na thakle OpenCV GrabCut — "
+            "jekhane cholbe seta result-e likha thakbe. rembg prothom bar "
+            "internet lage (~170 MB model).", 8, color=C.TEXT_DIM)
+        form.addWidget(self._pe_method)
+
+        self._pe_sheet_btn = QPushButton("🖼️  6-COPY A4 SHEET BANAO")
+        self._pe_sheet_btn.setFixedHeight(30)
+        self._pe_sheet_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        self._pe_sheet_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pe_sheet_btn.setStyleSheet(f"""
+            QPushButton {{ background: #00091a; color: {C.PRI};
+                border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+            QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+        """)
+        self._pe_sheet_btn.clicked.connect(self._on_pe_sheet)
+        form.addWidget(self._pe_sheet_btn)
+
+        self._pe_out = QTextEdit()
+        self._pe_out.setReadOnly(True)
+        self._pe_out.setFont(mono_font(9))
+        self._pe_out.setFixedHeight(120)
+        self._pe_out.setStyleSheet(self._fs.replace("QLineEdit", "QTextEdit"))
+        form.addWidget(self._pe_out)
+
+    def _on_pe_browse(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Photo kholo", "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if path and self._pe_photo is not None:
+            self._pe_photo.setText(path)
+
+    def _on_pe_sheet(self):
+        photo = (self._pe_photo.text() or "").strip() if self._pe_photo else ""
+        if not photo:
+            if self._pe_out is not None:
+                self._pe_out.setPlainText("Photo-r path dao — Browse chapo.")
+            return
+        size_id = "1.2x1.4"
+        if self._pe_size is not None:
+            idx = self._pe_size.currentIndex()
+            if 0 <= idx < len(self._PE_SIZE_IDS):
+                size_id = self._PE_SIZE_IDS[idx]
+        top_text = (self._pe_top.text() or "").strip() if self._pe_top else ""
+        bg_remove = bool(self._pe_bg.isChecked()) if self._pe_bg else True
+        self._pe_sheet_btn.setEnabled(False)
+        if self._pe_out is not None:
+            self._pe_out.setPlainText("⏳ Sheet banacchi… (background remove + border + 6 copy)")
+
+        def worker():
+            try:
+                from core import photo_editor as _pe
+                msg = _pe.make_a4_sheet_text(
+                    photo, top_text=top_text, size_id=size_id,
+                    bg_remove=bg_remove, open_after=True)
+            except Exception as e:
+                msg = f"A4 sheet banate parlam na: {e}"
+            self._pe_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="photo-editor-sheet").start()
+
+    def _on_pe_done(self, msg: str):
+        if self._pe_sheet_btn is not None:
+            self._pe_sheet_btn.setEnabled(True)
+        if self._pe_out is not None:
+            self._pe_out.setPlainText(msg or "Kichu uttor elo na.")
 
     def _build_video_edit_box(self, form: QVBoxLayout):
         """'🎬 VIDEO EDITOR' — open a video, set in/out by clicking, Cut/Export.
@@ -4875,6 +5911,7 @@ class MainAgentOverlay(QWidget):
 
     closed = pyqtSignal()
     _worker_done = pyqtSignal(str, str)   # (kind, message) -> Qt thread
+    _live_frame = pyqtSignal(bytes)       # live phone-screen JPEG -> Qt thread
 
     _OW, _OH = 520, 700
 
@@ -4907,6 +5944,10 @@ class MainAgentOverlay(QWidget):
         self._pc_mtime = -1.0
         self._tick_count = 0
         self._worker_done.connect(self._on_worker_done)
+        self._live_frame.connect(self._on_live_frame)
+        self._live_streamer = None    # core.live_screen.LiveScreenStreamer
+        self._live_btn = None
+        self._phone_title = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 16, 24, 16)
@@ -4943,7 +5984,9 @@ class MainAgentOverlay(QWidget):
         lay.setSpacing(8)
 
         def _section(title: str):
-            lay.addWidget(_lbl(title, 10, True, align=Qt.AlignmentFlag.AlignLeft))
+            w = _lbl(title, 10, True, align=Qt.AlignmentFlag.AlignLeft)
+            lay.addWidget(w)
+            return w
 
         def _txt(fs=9, color=C.PRI):
             w = QLabel("")
@@ -4965,8 +6008,18 @@ class MainAgentOverlay(QWidget):
         self._auto_lbl = _txt(8, C.TEXT_DIM)
         lay.addWidget(self._auto_lbl)
 
-        # (3) Phone screen
-        _section("📱  PHONE SCREEN (still image, 4 s-e refresh)")
+        # (2b) COMMANDER live panel — the user SEES the Commander
+        # commanding: current order → plan → which worker is doing what
+        # right now → each agent's status → final result + command log.
+        # Reads core/commander.status_text() on the 1 s tick; no worker
+        # thread needed (config read + registry snapshot, both fast).
+        _section("🎖️  COMMANDER — live feed (order → plan → worker → result)")
+        self._commander_lbl = _txt(8, C.TEXT_DIM)
+        lay.addWidget(self._commander_lbl)
+
+        # (3) Phone screen — stills (4 s refresh) or 🔴 LIVE stream.
+        self._phone_title = _section(
+            "📱  PHONE SCREEN (still image, 4 s-e refresh)")
         self._phone_img = QLabel("Phone screen ekhono ashe ni — Refresh chapo.")
         self._phone_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._phone_img.setFont(hud_font(8))
@@ -4982,6 +6035,14 @@ class MainAgentOverlay(QWidget):
             f"color: {C.PRI}; background: {C.PANEL2}; border-radius: 8px; padding: 5px;")
         b.clicked.connect(self._on_refresh_phone)
         row.addWidget(b)
+        self._live_btn = QPushButton("▶  LIVE screen")
+        self._live_btn.setFont(hud_font(8, QFont.Weight.Bold))
+        self._live_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._live_btn.setStyleSheet(
+            f"color: {C.PRI}; background: {C.PANEL2}; border: 1px solid {C.PRI_DIM}; "
+            f"border-radius: 8px; padding: 5px;")
+        self._live_btn.clicked.connect(self._on_toggle_live)
+        row.addWidget(self._live_btn)
         row.addStretch()
         lay.addLayout(row)
 
@@ -5079,6 +6140,60 @@ class MainAgentOverlay(QWidget):
             self._tick()
 
     # ── actions ──────────────────────────────────────────────────────────────
+
+    def _on_toggle_live(self) -> None:
+        """▶ LIVE — start/stop the live phone-screen stream.
+
+        The streamer runs on its own thread (core/live_screen.py); frames
+        arrive through _live_frame, status through _worker_done. When the
+        phone only sends stills, the streamer says so plainly and the 4 s
+        stills refresh keeps working as the fallback.
+        """
+        try:
+            st = self._live_streamer
+            if st is not None and st.running:
+                st.stop()
+                self._live_streamer = None
+                if self._live_btn is not None:
+                    self._live_btn.setText("▶  LIVE screen")
+                if self._phone_title is not None:
+                    self._phone_title.setText(
+                        "📱  PHONE SCREEN (still image, 4 s-e refresh)")
+                self._status_lbl.setText("⏹️ Live screen bondho — stills mode-e gelam.")
+                return
+            from core import jarvis_link
+            from core import live_screen as _ls
+            link = jarvis_link.LINK
+            if link is None or not link.paired:
+                self._status_lbl.setText(
+                    "📱 Phone pair kora nei — age QR scan koro, tarpor live screen.")
+                return
+            st = _ls.LiveScreenStreamer(
+                link=link,
+                on_frame=lambda data: self._live_frame.emit(bytes(data)),
+                on_status=lambda m: self._worker_done.emit("live_status", str(m)))
+            ok, msg = st.start()
+            self._status_lbl.setText(str(msg)[:300])
+            if ok:
+                self._live_streamer = st
+                if self._live_btn is not None:
+                    self._live_btn.setText("⏹  STOP live")
+                if self._phone_title is not None:
+                    self._phone_title.setText("📱  PHONE SCREEN — 🔴 LIVE")
+        except Exception as e:
+            self._status_lbl.setText(f"Live screen shuru korte parlam na: {e}")
+
+    def _on_live_frame(self, data: bytes) -> None:
+        """One live JPEG frame (Qt thread via _live_frame). Never raises."""
+        try:
+            px = QPixmap()
+            if not data or not px.loadFromData(bytes(data)):
+                return
+            self._phone_img.setPixmap(px.scaled(
+                460, 300, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation))
+        except Exception:
+            pass
 
     def _on_refresh_phone(self) -> None:
         self._status_lbl.setText("⏳ Phone-ke screen-er jonno bolchi…")
@@ -5264,6 +6379,12 @@ class MainAgentOverlay(QWidget):
                    if nxts else " • next run —"))
         except Exception:
             pass
+        # (2b) Commander live feed — refreshed every tick.
+        try:
+            from core import commander as _cmd
+            self._commander_lbl.setText(_cmd.status_text())
+        except Exception:
+            pass
         # 👤 Guest mode — read fresh each tick; never raises.
         try:
             from core.cat09_security import guest_mode_enabled as _gm
@@ -5285,12 +6406,24 @@ class MainAgentOverlay(QWidget):
                     "phone GPS + Location permission ON thakte hobe.")
         except Exception:
             pass
-        # (3)+(4) Screens re-poll every 4 s (tick is 1 s).
+        # (3)+(4) Screens re-poll every 4 s (tick is 1 s). While the live
+        # stream is running, the phone stills are skipped — the streamer
+        # drives the pixmap directly; the PC stills keep refreshing.
         if self._tick_count % 4 == 0:
-            self._load_phone_img()
+            live_on = bool(self._live_streamer is not None
+                           and self._live_streamer.running)
+            if not live_on:
+                self._load_phone_img()
             self._load_pc_img()
 
     def _do_close(self) -> None:
+        try:
+            st = self._live_streamer
+            if st is not None:
+                st.stop()
+            self._live_streamer = None
+        except Exception:
+            pass
         self._timer.stop()
         self.hide()
         self.closed.emit()

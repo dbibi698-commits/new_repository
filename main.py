@@ -73,6 +73,7 @@ from memory.memory_manager import (
 # system_status).
 from core import outcome
 from core import mood as _mood
+from core import language as _language
 from core.action_loader import strip_meta
 from actions.screen_processor  import _capture_camera, _capture_screen
 from actions.system_monitor    import SystemMonitor, get_system_status
@@ -1854,11 +1855,19 @@ class JarvisLive:
         """Send this turn's spoken audio to the phone (kind=tts) so the phone
         hears the PC AI's voice. Called once per finished turn, never for
         empty/interrupted turns. The buffer is cleared FIRST so a new turn's
-        audio can never mix into this one."""
+        audio can never mix into this one. Voice Settings > auto-reply
+        voice OFF means the phone gets text replies only — no spoken audio.
+        """
         buf = bytes(self._link_voice_buf)
         self._link_voice_buf.clear()
         if not buf:
             return
+        try:
+            from core import voice_settings as _vs
+            if not _vs.auto_reply_voice_on():
+                return
+        except Exception:
+            pass
         if len(buf) > 2_000_000:
             print(f"[Jarvis Link] voice too long ({len(buf)} bytes) — phone-e pathalam na.")
             return
@@ -2304,6 +2313,10 @@ class JarvisLive:
             "never a target. Never just say no — always do the next best real thing.\n\n"
         )
         parts.append(_mood.prompt_paragraph())
+        # 🗣️ LANGUAGE — শুধু বাংলা: read fresh at every session build, so
+        # flipping the toggle in Plugin Settings applies from the next
+        # (re)connect. Empty when the toggle is OFF.
+        parts.append(_language.prompt_paragraph())
 
         cfg = dict(
             response_modalities=["AUDIO"],

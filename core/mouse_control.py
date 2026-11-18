@@ -193,6 +193,22 @@ def scroll(amount) -> tuple[bool, str]:
         return (False, f"Scroll korte parlam na: {e}")
 
 
+def press_key(key) -> tuple[bool, str]:
+    """Press one key (e.g. "enter", "esc", "win", "tab", "f5").
+    Returns (ok, message). Never raises."""
+    try:
+        pg = _get_pyautogui()
+        if pg is None:
+            return _no_pyautogui()
+        key = ("" if key is None else str(key)).strip().lower()
+        if not key:
+            return (False, "Kon key chapbo — key-er naam dao (e.g. enter).")
+        pg.press(key)
+        return (True, f"✅ \"{key}\" key chaplam.")
+    except Exception as e:
+        return (False, f"Key chapte parlam na: {e}")
+
+
 def screenshot(path: str | None = None) -> tuple[bool, str]:
     """Take a screenshot and save it as a PNG.
 

@@ -364,6 +364,64 @@ class TestDriverMethods(unittest.TestCase):
 
 # ── step runner ──────────────────────────────────────────────────────────────
 
+class TestDriverVerification(unittest.TestCase):
+    """Verify the no-extension driver end to end (mocked Playwright):
+    the pyautogui fallback really drives the address bar, a locked
+    Chrome profile is reported plainly, and closing a CDP session never
+    closes the user's own Chrome."""
+
+    def test_pyautogui_navigate_uses_address_bar(self):
+        pag = FakePyAutoGUI()
+        d = drv.Driver(drv.BACKEND_PYAUTOGUI, pyautogui_mod=pag)
+        ok, msg = d.launch()
+        self.assertTrue(ok)
+        ok, msg = d.navigate("https://example.com")
+        self.assertTrue(ok, msg)
+        self.assertIn(("hotkey", ("ctrl", "l")), pag.calls)
+        self.assertIn(("typewrite", "https://example.com"), pag.calls)
+        self.assertIn(("press", "enter"), pag.calls)
+
+    def test_playwright_profile_lock_message(self):
+        chrom = FakeChromium(fail_launch=True)
+        d = drv.Driver(drv.BACKEND_PLAYWRIGHT,
+                       playwright_fn=make_pw_fn(chrom))
+        ok, msg = d.launch()
+        self.assertFalse(ok)
+        self.assertIn("Chrome already khula", msg)
+        self.assertIn("CDP", msg)
+
+    def test_cdp_close_keeps_user_chrome(self):
+        chrom = FakeChromium()
+        pw = FakePW(chrom)
+        d = drv.Driver(drv.BACKEND_CDP, playwright_fn=lambda: pw)
+        ok, msg = d.launch()
+        self.assertTrue(ok, msg)
+        self.assertEqual(d.backend, "cdp")
+        self.assertTrue(d.dom_capable)
+        ok, msg = d.close()
+        self.assertTrue(ok)
+        # The user's own Chrome (the fake context) was never closed.
+        self.assertFalse(chrom.context.closed)
+        self.assertTrue(pw.stopped)
+
+    def test_navigate_then_read_then_screenshot(self):
+        chrom = FakeChromium()
+        driver, backend, msg = drv.ensure_driver(
+            auto_install=False, playwright_fn=make_pw_fn(chrom))
+        self.assertEqual(backend, "playwright")
+        ok, _ = driver.navigate("https://github.com/new")
+        self.assertTrue(ok)
+        self.assertEqual(driver.current_url(), "https://github.com/new")
+        chrom.page.text = "hello page"
+        ok, text = driver.read_text()
+        self.assertTrue(ok)
+        self.assertEqual(text, "hello page")
+        ok, _ = driver.screenshot("/tmp/mark-test-shot.png")
+        self.assertTrue(ok)
+        self.assertIn(("screenshot", "/tmp/mark-test-shot.png"),
+                      chrom.page.calls)
+
+
 class TestRunSteps(unittest.TestCase):
     def test_happy_path_records_selector_used(self):
         d = ScriptedDriver()

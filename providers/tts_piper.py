@@ -255,6 +255,21 @@ def download(voice: str, log=None) -> Path:
 # ─────────────────────────────────────────────────────────────────────────────
 class PiperTTS:
     def __init__(self, cfg: dict):
+        cfg = dict(cfg or {})
+        # Voice Settings box (core/voice_settings.py): the stored rate
+        # becomes Piper's speed when this provider's own cfg leaves it at
+        # the default, and the stored voice when cfg sets none.
+        try:
+            from core import voice_settings as _vs
+            ov = _vs.tts_cfg_overrides()
+            if not (cfg.get("voice") or "").strip():
+                cfg["voice"] = ov["voice"]
+            # 1.0 is this provider's default speed — only then does the
+            # stored Voice Settings rate take over.
+            if _num(cfg.get("speed"), 1.0) == 1.0:
+                cfg["speed"] = ov["speed"]
+        except Exception:
+            pass
         self.voice = (cfg.get("voice") or "").strip()
         # Follow the language the user spoke, when a voice for it is on disk.
         self.follow = str(cfg.get("follow_language", "1")) not in ("", "0",
