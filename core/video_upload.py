@@ -2,8 +2,8 @@
 (Instagram / Facebook / YouTube).
 
 The browser flow — NOT the Graph API. Mark drives the user's own logged-in
-Chrome (no-extension driver: Playwright channel="chrome" first, CDP
-fallback, pyautogui last resort — zero extension calls) and clicks like a
+Chrome (direct driver: Playwright channel="chrome" first, CDP
+fallback, pyautogui last resort — zero browser helper calls) and clicks like a
 human, step by step: open the site -> Create -> Select from computer
 (real file-input handling via Playwright set_input_files, no OS file
 picker) -> caption/title -> Share/Post/Publish. After every step the flow
@@ -134,7 +134,7 @@ def file_ok(file_path: str) -> str:
             return f"Video file-ta pelam na: {path}"
         ext = os.path.splitext(path)[1].lower()
         if ext not in (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"):
-            return (f"Ei file-ta video mone hocche na ({ext or 'no extension'}) "
+            return (f"Ei file-ta video mone hocche na ({ext or 'kono file type nei'}) "
                     "— mp4/mov/avi/mkv/webm dao.")
         return ""
     except Exception as e:

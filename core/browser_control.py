@@ -1,8 +1,8 @@
-"""core/browser_control.py — 🖱️ Mouse-driven Chrome control (no extension).
+"""core/browser_control.py — 🖱️ Mouse-driven Chrome control (no browser helper).
 
 Opens the user's REAL Google Chrome with the MOUSE — the way a human
 would: click the Windows Start button, type "chrome", press Enter — and
-then drives the page precisely with the no-extension Playwright/CDP driver
+then drives the page precisely with the direct Playwright/CDP driver
 (core/browser_driver.py). The mouse opens the browser where the user can
 SEE it happen; the driver does the precise clicks/types by selector
 underneath, because a mouse alone cannot see the DOM.
@@ -116,7 +116,7 @@ def open_chrome_mouse(url: str = "https://www.google.com",
 
 
 def drive_url(url: str, driver_fn=None) -> tuple[bool, str]:
-    """Attach the no-extension driver and navigate to `url`.
+    """Attach the direct driver and navigate to `url`.
     Returns (ok, message). Never raises."""
     try:
         url = (url or "").strip() or "https://www.google.com"

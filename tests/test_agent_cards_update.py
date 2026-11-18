@@ -65,8 +65,9 @@ def _real_tools() -> set[str]:
 class TestAgentCardsRegistry(unittest.TestCase):
     def test_exactly_87_cards(self):
         from core import agent_cards as ac
-        self.assertEqual(ac.count(), 87, ac.count())
-        self.assertEqual(len(ac.CARD_DEFS), 87)
+        # Playwright round: + browser_setup (#88) + hosting_deploy (#89).
+        self.assertEqual(ac.count(), 89, ac.count())
+        self.assertEqual(len(ac.CARD_DEFS), 89)
 
     def test_first_card_is_main_agent(self):
         from core import agent_cards as ac
@@ -97,7 +98,7 @@ class TestAgentCardsRegistry(unittest.TestCase):
     def test_cards_live_readiness_never_raises(self):
         from core import agent_cards as ac
         cards = ac.cards()
-        self.assertEqual(len(cards), 87)
+        self.assertEqual(len(cards), 89)
         for c in cards:
             self.assertIn("ready", c)
             self.assertIn("missing", c)

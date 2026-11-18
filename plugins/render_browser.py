@@ -1,7 +1,7 @@
 """plugins/render_browser.py — 🌐 Render deploy WITHOUT an API key.
 
-Drives the user's own logged-in Chrome (no extension, no Render API key)
-via core/browser_automation.render_deploy on top of the no-extension
+Drives the user's own logged-in Chrome (no browser helper, no Render API key)
+via core/browser_automation.render_deploy on top of the direct
 Playwright/CDP driver (core/browser_driver.py). The deploy flow takes a
 few minutes, so run() starts it on a worker thread and returns at once;
 the result (service URL) is written to the activity log when it finishes.
@@ -40,7 +40,7 @@ PLUGIN_SETTINGS = {
     "title": "🌐 DEPLOY ON RENDER — BROWSER (NO API KEY)",
     # Extra box the Plugin Settings overlay builds at the end of this
     # section: "Deploy on Render" via the user's own logged-in Chrome
-    # (no-extension Playwright/CDP driver). The overlay only knows the
+    # (direct Playwright/CDP driver). The overlay only knows the
     # widget key; the box itself lives in gui/overlays.py.
     "widget": "browser_render",
     "fields": [],

@@ -1,7 +1,7 @@
 """plugins/advanced_browser.py — Advanced Browser Control tool + settings widget.
 
-No-extension driver (Playwright channel="chrome" first, CDP fallback,
-pyautogui last resort — zero extension calls). Runs human-like actions step
+Direct driver (Playwright channel="chrome" first, CDP fallback,
+pyautogui last resort — zero browser helper calls). Runs human-like actions step
 by step — open / click / type / fill / scroll / play / upload / multi-tab /
 wait / screenshot — verifying the page actually changed after EVERY action
 and reporting the exact failed step live. Login = the user's own Chrome
@@ -38,7 +38,7 @@ PLUGIN = {
 
 PLUGIN_SETTINGS = {
     "namespace": "advanced_browser",
-    "title": "🌐 ADVANCED BROWSER CONTROL — no extension, manusher moto",
+    "title": "🌐 ADVANCED BROWSER CONTROL — no browser helper, manusher moto",
     "widget": "advanced_browser",
     "fields": [],
 }

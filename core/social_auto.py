@@ -2,7 +2,7 @@
 
 Open a profile, play a reel/video, like, comment, send a message, and
 auto-reply — Mark does it once the user tells it once. Flows run through
-the no-extension browser driver on Instagram/Facebook in the user's
+the direct browser driver on Instagram/Facebook in the user's
 logged-in Chrome.
 
 PERMISSION-FIRST (the user's own rule): NOTHING is posted or commented

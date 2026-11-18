@@ -58,8 +58,9 @@ def _real_tools() -> set[str]:
 
 class TestCardCountAndMapping(unittest.TestCase):
     def test_87_cards(self):
-        self.assertEqual(ac.count(), 87)
-        self.assertEqual(len(ac.CARD_DEFS), 87)
+        # Playwright round: 87 + browser_setup (#88) + hosting_deploy (#89).
+        self.assertEqual(ac.count(), 89)
+        self.assertEqual(len(ac.CARD_DEFS), 89)
 
     def test_ids_unique_and_new_cards_present(self):
         ids = [c["id"] for c in ac.CARD_DEFS]

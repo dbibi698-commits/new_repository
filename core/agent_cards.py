@@ -33,7 +33,7 @@ so importing this module can never create a cycle.
 """
 from __future__ import annotations
 
-# ── the 87 cards ─────────────────────────────────────────────────────────────
+# ── the 88 cards ─────────────────────────────────────────────────────────────
 # id: stable, lowercase — used in config, the dashboard JSON and the UI.
 # tool: the REAL tool/plugin/action name that does this card's job.
 # action: the key in _ACTIONS below. needs: what the card needs to run
@@ -65,7 +65,7 @@ CARD_DEFS = [
     },
     {
         "id": "browser_control", "name": "Browser Control", "icon": "🌐",
-        "job": "Mouse diye Chrome khola + page chalano (no extension).",
+        "job": "Mouse diye Chrome khola + page chalano (no browser helper).",
         "tool": "browser_control", "action": "browser_open",
         "needs": "Chrome + Playwright/CDP driver",
     },
@@ -547,6 +547,20 @@ CARD_DEFS = [
                "upload/tab — prottek step verify kore.",
         "tool": "advanced_browser", "action": "advanced_browser_status",
         "needs": "Chrome + Playwright/CDP driver",
+    },
+    {
+        "id": "browser_setup", "name": "Browser Setup", "icon": "🧪",
+        "job": "Playwright full process: Python check → pip install → "
+               "browser download → sample code run.",
+        "tool": "browser_setup", "action": "browser_setup_status",
+        "needs": "System Python (Mark-er bundled Python na)",
+    },
+    {
+        "id": "hosting_deploy", "name": "Hosting / Deploy", "icon": "🚀",
+        "job": "Render Web Service + Static Site deploy, GitHub repo "
+               "create — tomar logged-in Chrome-e, AUTO ba MANUAL mode.",
+        "tool": "hosting_deploy", "action": "hosting_deploy_status",
+        "needs": "Render/GitHub login (tomar Chrome-e)",
     },
 ]
 
@@ -1230,6 +1244,22 @@ def _app_editor_status() -> str:
             "(Notepad/Word/Paint/Photos...). App-er naam bolo.")
 
 
+def _browser_setup_status() -> str:
+    try:
+        from core import browser_setup as _bs
+        return _bs.status_text()
+    except Exception as e:
+        return f"Browser Setup status dekhte parlam na: {e}"
+
+
+def _hosting_deploy_status() -> str:
+    try:
+        from plugins import hosting_deploy as _hd
+        return _hd.status_text()
+    except Exception as e:
+        return f"Hosting / Deploy status dekhte parlam na: {e}"
+
+
 def _advanced_browser_status() -> str:
     try:
         from core import browser_driver as _drv
@@ -1336,6 +1366,8 @@ _ACTIONS = {
     "mouse_video_edit_status": _mouse_video_edit_status,
     "app_editor_status": _app_editor_status,
     "advanced_browser_status": _advanced_browser_status,
+    "browser_setup_status": _browser_setup_status,
+    "hosting_deploy_status": _hosting_deploy_status,
 }
 
 

@@ -1,7 +1,7 @@
 """core/browser_automation.py — GitHub repo create + Render deploy flows.
 
-Runs ON TOP of core/browser_driver.py (no-extension Playwright/CDP driver).
-Nothing in this module touches the Chrome extension, the dashboard
+Runs ON TOP of core/browser_driver.py (direct Playwright/CDP driver).
+Nothing in this module touches the browser helper, the dashboard
 browser-command queue, or any API token: the flows drive the user's own
 logged-in Chrome exactly the way a person would — navigate, fill, click,
 read the page back.
@@ -211,6 +211,55 @@ def run_steps(steps: list[dict], driver: Driver,
             elif action == "play":
                 sel = str(step.get("selector") or "").strip() or None
                 ok, msg = driver.play_video(sel)
+            elif action == "click_text":
+                # Click by visible text: Playwright text= selector first,
+                # then JS click (works on every DOM backend).
+                text = str(step.get("text") or "").strip()
+                if not text:
+                    ok, msg = False, "click_text-e text dao."
+                else:
+                    ok, msg = driver.click(f"text={text}")
+                    if not ok:
+                        from core.browser_flows import (
+                            _eval_ok as _flow_eval_ok,
+                            click_text_js as _click_text_js)
+                        ok, msg = _flow_eval_ok(driver, _click_text_js(text))
+                    if ok:
+                        used = f"text={text}"
+            elif action == "click_coords":
+                # Click at screen coordinates (mouse control).
+                try:
+                    x = int(step.get("x") or 0)
+                    y = int(step.get("y") or 0)
+                    ok, msg = driver.mouse_click(x, y)
+                    if ok:
+                        used = f"({x}, {y})"
+                except Exception:
+                    ok, msg = False, "click_coords-e x + y dao (number)."
+            elif action == "fill_by_label":
+                # Fill a form by FIELD LABELS, not selectors:
+                # {label: text} — the user names the field as they see it.
+                fields = step.get("fields") or {}
+                if not isinstance(fields, dict) or not fields:
+                    ok, msg = False, "fill_by_label-e fields dao — {label: text}."
+                else:
+                    from core.browser_flows import (
+                        _eval_ok as _flow_eval_ok,
+                        fill_by_label_js as _fill_by_label_js)
+                    ok, msg = _flow_eval_ok(driver, _fill_by_label_js(fields))
+                    if ok:
+                        used = f"{msg} ta field (label diye)"
+            elif action == "scroll":
+                # Scroll the page by pixels (dy, down is positive).
+                try:
+                    dy = int(step.get("dy") or 500)
+                    ok, msg = driver.eval_js(f"window.scrollBy(0,{dy}); 'OK:scrolled'")
+                    if ok and (msg or "").strip().startswith("OK:"):
+                        ok, msg = True, f"Scroll korlam ({dy}px)."
+                    elif ok:
+                        ok, msg = True, "Scroll korlam."
+                except Exception:
+                    ok, msg = False, "scroll-e dy dao (number)."
             elif action == "key":
                 ok, msg = driver.press_key(str(step.get("key") or ""))
             elif action == "set_file":

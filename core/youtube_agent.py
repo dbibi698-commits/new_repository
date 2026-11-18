@@ -5,7 +5,7 @@
 - youtube_play: search (or a direct URL) -> resolve a stream URL with
   yt-dlp -> play it on MARK'S OWN video screen in the HUD
   (player.show_video) when a player is available, else open the video
-  in Chrome via the no-extension browser driver. Never fakes playback.
+  in Chrome via the direct browser driver. Never fakes playback.
 - youtube_like / youtube_comment: REAL YouTube Data API v3 calls that
   need a FRESH OAuth access token (youtube_access_token, ~1 h). The
   saved token EXPIRED before (real 401) — when it is missing or
@@ -190,7 +190,7 @@ def play_video(query_or_url: str, player=None, open_browser_fn=None) -> str:
     1. direct URL -> that video; else search (needs API key) -> first hit
     2. yt-dlp resolves a stream URL -> player.show_video (HUD, Mark's own
        screen) when a player is given
-    3. else open the watch URL in Chrome via the no-extension browser driver
+    3. else open the watch URL in Chrome via the direct browser driver
     Returns a short status string. Never raises."""
     try:
         q = str(query_or_url or "").strip()
@@ -219,7 +219,7 @@ def play_video(query_or_url: str, player=None, open_browser_fn=None) -> str:
                         f"screen-e. (Pause/Seek HUD-ei pabe.)")
             except Exception:
                 pass
-        # 2) Chrome via the no-extension browser driver.
+        # 2) Chrome via the direct browser driver.
         try:
             from core import browser_driver as _bd
             driver, _backend, _msg = _bd.ensure_driver(auto_install=False)

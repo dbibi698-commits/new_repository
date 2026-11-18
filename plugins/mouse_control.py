@@ -7,7 +7,7 @@ never touches Qt (see AGENTS.md). Returns a short string, never raises.
 Actions: move, click, double_click, right_click, type, scroll, screenshot,
 position. Say "mouse_control" when the user asks Mark to move the mouse,
 click something, type into the focused window, scroll, or take a screenshot —
-NOT browser_control (that drives Chrome through the extension).
+NOT browser_control (that drives Chrome through the browser helper).
 """
 from __future__ import annotations
 

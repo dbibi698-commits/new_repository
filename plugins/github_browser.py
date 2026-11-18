@@ -1,7 +1,7 @@
 """plugins/github_browser.py — 📦 GitHub repo create WITHOUT a token.
 
-Drives the user's own logged-in Chrome (no extension, no API token) via
-core/browser_automation.github_new_repo on top of the no-extension
+Drives the user's own logged-in Chrome (no browser helper, no API token) via
+core/browser_automation.github_new_repo on top of the direct
 Playwright/CDP driver (core/browser_driver.py). The browser work takes a
 minute or two, so run() starts it on a worker thread and returns at once;
 the result is written to the activity log when it finishes.
@@ -39,7 +39,7 @@ PLUGIN_SETTINGS = {
     "title": "📦 CREATE REPOSITORY — BROWSER (NO TOKEN)",
     # Extra box the Plugin Settings overlay builds at the end of this
     # section: "Create Repository" via the user's own logged-in Chrome
-    # (no-extension Playwright/CDP driver). The overlay only knows the
+    # (direct Playwright/CDP driver). The overlay only knows the
     # widget key; the box itself lives in gui/overlays.py.
     "widget": "browser_repo",
     "fields": [],

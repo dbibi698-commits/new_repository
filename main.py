@@ -73,6 +73,7 @@ from memory.memory_manager import (
 # system_status).
 from core import outcome
 from core import mood as _mood
+from core import reply_guard as _rg
 from core import language as _language
 from core.action_loader import strip_meta
 from actions.screen_processor  import _capture_camera, _capture_screen
@@ -799,13 +800,12 @@ TOOL_DECLARATIONS = [
     {
         "name": "browser_control",
         "description": (
-            "Control the user's Chrome browser through the Mark-LVII Chrome "
-            "extension (it must be installed + connected to this dashboard). "
-            "Open any website, navigate, click, type, scroll, read the page, "
-            "or fill a login form. Call when the user says: browser-e <site> "
-            "kholo, Chrome-e eta kholo, click koro, login koro. Mark NEVER "
-            "sees website passwords — login credentials live only in the "
-            "extension popup on the user's browser."
+            "Control the user's Chrome browser directly — open any website, "
+            "navigate, click, type, scroll, read the page, or fill a login "
+            "form. Call when the user says: browser-e <site> kholo, "
+            "Chrome-e eta kholo, click koro, login koro. Mark NEVER sees "
+            "website passwords — login credentials stay only in the user's "
+            "own browser."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -1024,6 +1024,20 @@ class JarvisLive:
         # None means nothing is outstanding. Armed by the send sites, cleared by
         # the first frame of ANY response, watched by _watch_stall().
         self._rx_deadline          = None
+        self._tool_running: str | None = None  # tool name while a tool call is in flight
+        # Thread-based reply monitor (core/reply_guard.py): watches the
+        # pending-reply deadline + the event-loop heartbeat from a REAL
+        # thread, so a blocked loop cannot silence it. Fires 10 s after
+        # the loop-bound watchdog, as a backup.
+        self._reply_monitor = _rg.ReplyMonitor(
+            stall_limit_s=_STALL_LIMIT + 10.0,
+            speak=lambda t: _rg.speak_with_timeout(
+                t, fallback_fn=_rg.system_speak),
+            show=lambda t: self.ui.set_live_reply(t),
+            reconnect=lambda reason: self.request_reconnect(
+                keep_context=True, reason=reason),
+            log=lambda t: self.ui.write_log(t),
+        )
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
         self._visemes              = VisemeStream()
@@ -1628,10 +1642,18 @@ class JarvisLive:
         """
         if self._rx_deadline is None:
             self._rx_deadline = time.monotonic() + _STALL_LIMIT
+        try:
+            self._reply_monitor.arm()
+        except Exception:
+            pass
 
     def _clear_stall(self) -> None:
         """The server spoke, so the return path is alive."""
         self._rx_deadline = None
+        try:
+            self._reply_monitor.clear()
+        except Exception:
+            pass
 
     async def _watch_stall(self) -> None:
         """Rebuild the session when a sent turn goes unanswered past the limit.
@@ -1647,6 +1669,21 @@ class JarvisLive:
             if deadline is None or time.monotonic() < deadline:
                 continue
             self._clear_stall()
+            # A tool is mid-flight: the server DID answer (with a tool
+            # call) — it is the tool that is slow, not the session. Say
+            # so and keep waiting; the hard tool timeout in
+            # _receive_audio is what aborts a truly stuck tool. Never
+            # tear the session down under a running tool.
+            if getattr(self, "_tool_running", None):
+                print(f"[JARVIS] ⚠️  Tool {self._tool_running} slow — still working.")
+                try:
+                    self.ui.write_log(f"SYS: {_rg.TOOL_WORKING_LINE}")
+                    self.ui.set_live_reply(_rg.TOOL_WORKING_LINE)
+                    self._speak_local(_rg.TOOL_WORKING_LINE)
+                except Exception:
+                    pass
+                self._arm_stall()  # watch the tool for another 15 s
+                continue
             print(f"[JARVIS] ⚠️  No response for {_STALL_LIMIT:.0f}s — "
                   f"the live session is not answering. Rebuilding it.")
             try:
@@ -1661,6 +1698,15 @@ class JarvisLive:
             self.request_reconnect(keep_context=True, reason="no response")
             return          # this session is going away; the new one gets its own watcher
 
+    async def _heartbeat_loop(self) -> None:
+        """Proves the event loop is alive, every 2 s, to the thread monitor."""
+        while True:
+            await asyncio.sleep(2)
+            try:
+                self._reply_monitor.heartbeat()
+            except Exception:
+                pass
+
     def _speak_local(self, text: str) -> None:
         """Speak one short line through the LOCAL TTS fallback (EdgeTTS /
         system TTS), on a daemon thread. A FRESH player is created per
@@ -1671,21 +1717,13 @@ class JarvisLive:
             if not t:
                 return
             def _work():
-                try:
-                    from core import tts as _tts
-                    cfg = {}
-                    try:
-                        from memory.config_manager import get_plugin_config
-                        cfg = dict(get_plugin_config("voice_settings") or {})
-                    except Exception:
-                        cfg = {}
-                    player = _tts.create_tts_player(
-                        {"tts_engine": cfg.get("tts_engine", "edgetts"),
-                         "tts_voice": cfg.get("voice", ""),
-                         "tts_speed": cfg.get("rate", 1.0)})
-                    player.speak(t[:300])
-                except Exception as e:
-                    print(f"[JARVIS] local TTS fallback failed: {e}")
+                # THINKING-HANG FIX: EdgeTTS streams with no timeout, so
+                # the fallback line itself could hang forever on a dead
+                # network and the user heard nothing. speak_with_timeout
+                # gives EdgeTTS 20 s, then tries the local system TTS.
+                ok = _rg.speak_with_timeout(t, fallback_fn=_rg.system_speak)
+                if not ok:
+                    print("[JARVIS] local TTS fallback failed: no engine spoke")
             threading.Thread(target=_work, daemon=True,
                              name="local-tts-fallback").start()
         except Exception:
@@ -2336,12 +2374,12 @@ class JarvisLive:
             "khulle dekha jay, Accessibility ON lagbe phone-e). phone_say talks to "
             "the phone Jarvis AI-to-AI and brings back its reply. play_game plays "
             "a game on the phone or PC.\n"
-            "• Browser control: browser_control — Chrome extension diye pura browser "
-            "chalao (kholo, click, type, login). Extension install + connect thakte hobe. "
-            "Mark NEVER sees website passwords — login credentials live only in the "
-            "extension popup on the user's browser.\n"
+            "• Browser control: browser_control — direct browser control diye pura browser "
+            "chalao (kholo, click, type, login). Browser helper connect thakte hobe. "
+            "Mark NEVER sees website passwords — login credentials stay only in the "
+            "user's own browser.\n"
             "• GitHub + WhatsApp: Plugin Settings > 🔗 CONNECTORS-e token bosale API diye "
-            "connect hobe; browser extension diye github.com / web.whatsapp.com-eo chalano jabe.\n"
+            "connect hobe; direct browser control diye github.com / web.whatsapp.com-eo chalano jabe.\n"
             "• PC power: pc_power — shutdown/restart/sleep/screen off/on. ALWAYS confirm "
             "age (confirm=false diye jiggesh koro, user 'ha' bolle tobei confirm=true).\n"
             "• Render hosting: render_status (Direct Connect URL), render_deploy (Render-e "
@@ -2805,7 +2843,7 @@ class JarvisLive:
                                   "read, login, signup, upload, screenshot, tabs, bookmarks, "
                                   "fill, close_popups, na autoscroll?")
                     else:
-                        # Per-action extras for the new extension commands
+                        # Per-action extras for the new browser helper commands
                         # (the queue drops any key outside its whitelist).
                         _extra = {}
                         for _k in ("tab_action", "tab_id", "bookmark_action", "bookmark_id",
@@ -2824,7 +2862,7 @@ class JarvisLive:
                             result = ("✅ Browser: " + (str(_data)[:400] if _data else "hoyeche."))
                         else:
                             result = ("⚠️ Browser command " + str(_res.get("error") or "timeout") +
-                                      " — Chrome extension install + connect kora ache kina dekho "
+                                      " — browser helper connect kora ache kina dekho "
                                       "(popup-e dashboard URL + token).")
 
             elif name == "pc_power":
@@ -3358,11 +3396,35 @@ class JarvisLive:
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
                             print(f"[JARVIS] 📞 {fc.name}")
-                            fr = await self._execute_tool(fc)
+                            # THINKING-HANG FIX: a tool call used to block
+                            # this loop forever with the stall watchdog
+                            # already cleared by the frame above. Arm the
+                            # deadline for the tool, and abort it on a hard
+                            # timeout so the conversation can continue.
+                            self._arm_stall()
+                            self._tool_running = fc.name
+                            try:
+                                fr = await asyncio.wait_for(
+                                    self._execute_tool(fc),
+                                    timeout=_rg.tool_timeout(fc.name))
+                            except asyncio.TimeoutError:
+                                print(f"[JARVIS] ⏱️ Tool {fc.name} timed out "
+                                      f"after {_rg.tool_timeout(fc.name):.0f}s")
+                                self.ui.write_log(
+                                    f"SYS: {fc.name} tool-ta beshi somoy nilo — timeout.")
+                                fr = types.FunctionResponse(
+                                    id=fc.id, name=fc.name,
+                                    response={"result": _rg.TOOL_TIMEOUT_LINE})
+                            finally:
+                                self._tool_running = None
+                                self._clear_stall()
                             fn_responses.append(fr)
                         await self.session.send_tool_response(
                             function_responses=fn_responses
                         )
+                        # The server now owes us a reply to the tool
+                        # response — arm the stall clock for that too.
+                        self._arm_stall()
                         await self._flush_pending_vision()
         except Exception as e:
             print(f"[JARVIS] ❌ Recv: {e}")
@@ -3938,9 +4000,23 @@ class JarvisLive:
                 http_options={"api_version":
                               "v1alpha" if self._enhanced_live else "v1beta"},
             )
-            async with client.aio.live.connect(model=live_model,
-                                               config=config) as session:
+            # THINKING-HANG FIX: a hung connect used to leave the retry
+            # loop at THINKING forever with no session and no watchdog.
+            connect_cm = client.aio.live.connect(model=live_model,
+                                                 config=config)
+            try:
+                session = await asyncio.wait_for(
+                    connect_cm.__aenter__(), timeout=60.0)
+            except asyncio.TimeoutError:
+                raise TimeoutError(
+                    "Live connect 60s-e holo na — net slow ba server down hote pare.")
+            try:
                 yield session
+            finally:
+                try:
+                    await connect_cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
             return
 
         from memory.config_manager import get_pipeline, get_provider_config
@@ -4037,6 +4113,10 @@ class JarvisLive:
                     if link is not None and not link.paired:
                         self.ui.show_jarvis_link()
                 threading.Timer(3.0, _auto_show_link).start()
+
+        # Thread monitor for the reply pipeline — start once; it lives
+        # for the whole process and survives every session rebuild.
+        self._reply_monitor.start()
 
         while True:
             try:
@@ -4175,6 +4255,7 @@ class JarvisLive:
                     self._reconnect_event.clear()  # ignore requests from before this session
                     tg.create_task(self._watch_reconnect())
                     tg.create_task(self._watch_stall())
+                    tg.create_task(self._heartbeat_loop())
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
                     tg.create_task(self._receive_audio())

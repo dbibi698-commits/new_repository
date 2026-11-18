@@ -1,8 +1,8 @@
-"""core/browser_driver.py — NO-EXTENSION browser driver for Mark-LVII.
+"""core/browser_driver.py — DIRECT browser driver for Mark-LVII.
 
 Drives the user's REAL installed Chrome — the one they are already logged
-into on github.com and dashboard.render.com — with no browser extension
-involved at all. The extension is a separate, already-delivered feature;
+into on github.com and dashboard.render.com — with no browser browser helper
+involved at all. The browser helper is a separate, already-delivered feature;
 nothing in this module imports it, talks to the dashboard browser-command
 queue, or depends on it in any way.
 

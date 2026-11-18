@@ -1692,6 +1692,8 @@ class PluginSettingsOverlay(QWidget):
     _sa_done = pyqtSignal(str)                 # social auto finished: result text
     _mve_done = pyqtSignal(str)                # mouse video edit finished: result text
     _ab_done = pyqtSignal(str)                 # advanced browser finished: result text
+    _bs_done = pyqtSignal(str)                 # browser setup finished: result text
+    _hd_done = pyqtSignal(str)                 # hosting/deploy finished: result text
     _modes_done = pyqtSignal(str)              # mood switch finished: result text
     _running24_done = pyqtSignal(str)          # 24h status refresh finished: text
     _auto_tasks_done = pyqtSignal(str)         # auto-tasks action finished: text
@@ -1736,6 +1738,8 @@ class PluginSettingsOverlay(QWidget):
         self._sa_done.connect(self._on_sa_done)
         self._mve_done.connect(self._on_mve_done)
         self._ab_done.connect(self._on_ab_done)
+        self._bs_done.connect(self._on_bs_done)
+        self._hd_done.connect(self._on_hd_done)
         self._modes_done.connect(self._on_modes_done)
         self._running24_done.connect(self._on_running24_done)
         self._auto_tasks_done.connect(self._on_auto_tasks_done)
@@ -1837,6 +1841,26 @@ class PluginSettingsOverlay(QWidget):
         self._ab_login_btn = None
         self._ab_login_lbl = None
         self._ab_out = None
+        # Browser Setup box widgets (built by _build_browser_setup_box).
+        # Hosting / Deploy box widgets (built by _build_hosting_deploy_box).
+        self._hd_service = None
+        self._hd_repo = None
+        self._hd_branch = None
+        self._hd_repo_name = None
+        self._hd_private = None
+        self._hd_mode = None
+        self._hd_out = None
+        self._bs_url = None
+        self._bs_selector = None
+        self._bs_status_lbl = None
+        self._bs_check_btn = None
+        self._bs_pip_btn = None
+        self._bs_install_btn = None
+        self._bs_verify_btn = None
+        self._bs_full_btn = None
+        self._bs_run_btn = None
+        self._bs_copy_btn = None
+        self._bs_out = None
         # Agent cards box widgets (built by _build_agent_cards_box).
         self._agent_cards: dict[str, dict] = {}  # card_id -> {status, btn}
         self._agent_cards_lay = None
@@ -2061,6 +2085,10 @@ class PluginSettingsOverlay(QWidget):
             self._build_mouse_video_edit_box(form)
         if sec.get("widget") == "advanced_browser":
             self._build_advanced_browser_box(form)
+        if sec.get("widget") == "browser_setup":
+            self._build_browser_setup_box(form)
+        if sec.get("widget") == "hosting_deploy":
+            self._build_hosting_deploy_box(form)
         if sec.get("widget") == "modes":
             self._build_modes_box(form)
         if sec.get("widget") == "running24":
@@ -4307,15 +4335,15 @@ class PluginSettingsOverlay(QWidget):
         """'🌐 ADVANCED BROWSER CONTROL' box: URL + action + selector +
         text + Run, with a LIVE step report and login status.
 
-        No-extension driver (Playwright channel="chrome" first, CDP
-        fallback, pyautogui last resort). Every step is verified after it
-        runs; a failed step names itself and stops. Runs on a worker
-        thread; results come back through _ab_done so only the Qt thread
-        touches widgets.
+        Direct driver (Playwright channel="chrome" first, CDP fallback,
+        pyautogui last resort). Every step is verified after it runs; a
+        failed step names itself and stops. Runs on a worker thread;
+        results come back through _ab_done so only the Qt thread touches
+        widgets.
         """
         form.addSpacing(6)
         form.addWidget(self._lbl(
-            "🌐  ADVANCED BROWSER CONTROL — no extension, manusher moto",
+            "🌐  ADVANCED BROWSER CONTROL — direct, manusher moto",
             10, True, C.PRI))
         form.addWidget(self._lbl(
             "Tomar nijer Chrome-e kholo / click / type / form fill / scroll "
@@ -4376,6 +4404,41 @@ class PluginSettingsOverlay(QWidget):
         self._ab_login_btn.clicked.connect(self._on_ab_login)
         _wrap2 = QWidget(); _wrap2.setLayout(_btns)
         form.addWidget(_wrap2)
+
+        # Mode + sign up / login + takeover row (2026-11-18 add-on).
+        _row2 = QHBoxLayout(); _row2.setSpacing(6)
+        self._ab_mode = QComboBox()
+        self._ab_mode.addItems(["AUTO — Mark korbe", "MANUAL — ami korbo"])
+        self._ab_mode.setFont(hud_font(9))
+        self._ab_mode.setFixedHeight(30)
+        self._ab_mode.setStyleSheet(
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 8px; }}")
+        _row2.addWidget(self._ab_mode)
+        self._ab_signup_btn = QPushButton("📝  SIGN UP")
+        self._ab_loginform_btn = QPushButton("🔑  LOGIN")
+        self._ab_takeover_btn = QPushButton("🙋  TUMI KORO")
+        for _b in (self._ab_signup_btn, self._ab_loginform_btn,
+                   self._ab_takeover_btn):
+            _b.setFixedHeight(30)
+            _b.setFont(hud_font(8, QFont.Weight.Bold))
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _b.setStyleSheet(f"""
+                QPushButton {{ background: #00091a; color: {C.PRI};
+                    border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+                QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            """)
+            _row2.addWidget(_b)
+        self._ab_signup_btn.clicked.connect(self._on_ab_signup)
+        self._ab_loginform_btn.clicked.connect(self._on_ab_login_form)
+        self._ab_takeover_btn.clicked.connect(self._on_ab_takeover)
+        _wrap3 = QWidget(); _wrap3.setLayout(_row2)
+        form.addWidget(_wrap3)
+        form.addWidget(self._lbl(
+            "Sign up / Login: URL opore, field JSON niche (_ab_text-e) — "
+            "{\"Email\": \"...\", \"Password\": \"...\"} (label diye). "
+            "MANUAL-e tumi click korbe, Mark dekhbe ar bolbe; TUMI KORO "
+            "chaple Mark baki-ta korbe.", 8, color=C.TEXT_DIM))
 
         self._ab_login_lbl = self._lbl(
             "Login status: ekhono check kora hoy ni.", 8, color=C.TEXT_DIM)
@@ -4467,6 +4530,92 @@ class PluginSettingsOverlay(QWidget):
         threading.Thread(target=worker, daemon=True,
                          name="advanced-browser-login").start()
 
+    def _ab_mode_manual(self) -> bool:
+        try:
+            return (self._ab_mode is not None
+                    and self._ab_mode.currentText().startswith("MANUAL"))
+        except Exception:
+            return False
+
+    def _ab_fields_json(self) -> dict:
+        import json as _json
+        text = (self._ab_text.text() or "").strip() if self._ab_text else ""
+        if not text:
+            return {}
+        try:
+            parsed = _json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    def _on_ab_signup(self):
+        self._on_ab_auth("signup")
+
+    def _on_ab_login_form(self):
+        self._on_ab_auth("login")
+
+    def _on_ab_auth(self, kind: str):
+        url = (self._ab_url.text() or "").strip() if self._ab_url else ""
+        fields = self._ab_fields_json()
+        if not url or not fields:
+            if self._ab_out is not None:
+                self._ab_out.setPlainText(
+                    "Sign up / Login-er jonno URL + field JSON dao.")
+            return
+        if self._ab_out is not None:
+            self._ab_out.setPlainText(
+                f"⏳ {'Sign up' if kind == 'signup' else 'Login'} cholche…")
+        manual = self._ab_mode_manual()
+
+        def worker():
+            try:
+                if manual:
+                    from plugins import browser_advanced as _ba_plug
+                    # Adapter: the plugin narrates via player.write_log;
+                    # here that lands in the live report box.
+                    class _Adapter:
+                        def write_log(self, text):
+                            self_out = text
+                            try:
+                                _self._ab_done.emit(str(self_out))
+                            except Exception:
+                                pass
+                        def request_say(self, text):
+                            pass
+                    _self = self
+                    msg = _ba_plug._start_manual(
+                        kind, url, fields,
+                        "Sign up" if kind == "signup" else "Log in",
+                        (), _Adapter())
+                    self._ab_done.emit(str(msg))
+                else:
+                    from core import browser_flows as _bf
+                    if kind == "signup":
+                        ok, msg = _bf.signup(url, fields)
+                    else:
+                        ok, msg = _bf.login(url, fields)
+                    self._ab_done.emit(str(msg))
+            except Exception as e:
+                self._ab_done.emit(f"Auth korte parlam na: {e}")
+
+        threading.Thread(target=worker, daemon=True,
+                         name="advanced-browser-auth").start()
+
+    def _on_ab_takeover(self):
+        if self._ab_out is not None:
+            self._ab_out.setPlainText("⏳ AUTO mode-e nilam — baki step ami korchi…")
+
+        def worker():
+            try:
+                from plugins import browser_advanced as _ba_plug
+                msg = _ba_plug._takeover(None)
+                self._ab_done.emit(str(msg))
+            except Exception as e:
+                self._ab_done.emit(f"Takeover korte parlam na: {e}")
+
+        threading.Thread(target=worker, daemon=True,
+                         name="advanced-browser-takeover").start()
+
     def _on_ab_done(self, msg: str):
         for _b in (self._ab_open_btn, self._ab_run_btn, self._ab_login_btn):
             if _b is not None:
@@ -4477,6 +4626,403 @@ class PluginSettingsOverlay(QWidget):
             first = (msg or "").splitlines()[0] if msg else ""
             if "login" in first.lower():
                 self._ab_login_lbl.setText(first)
+
+    def _build_hosting_deploy_box(self, form: QVBoxLayout):
+        """'🚀 HOSTING / DEPLOY' box: Render Web Service + Static Site +
+        GitHub repo create, AUTO ba MANUAL mode. Runs on a worker thread;
+        results come back through _hd_done so only the Qt thread touches
+        widgets. Login: tomar nijer Chrome profile — ami password dekhi
+        na, rakhi na.
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl(
+            "🚀  HOSTING / DEPLOY — Render + GitHub repo create",
+            10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Render Web Service / Static Site deploy ba GitHub-e repo create "
+            "— tomar logged-in Chrome-e. AUTO-e Mark click korbe, MANUAL-e "
+            "tumi click korbe ar Mark dekhbe. Deploy-er jonno Render account "
+            "+ connected repo lagbe; repo create-er jonno GitHub login lagbe.",
+            8, color=C.TEXT_DIM))
+
+        self._hd_service = QLineEdit()
+        self._hd_service.setPlaceholderText("Service naam (jemon: amar-site)")
+        self._hd_service.setFont(hud_font(10))
+        self._hd_service.setFixedHeight(30)
+        self._hd_service.setStyleSheet(self._fs)
+        form.addWidget(self._hd_service)
+
+        self._hd_repo = QLineEdit()
+        self._hd_repo.setPlaceholderText("Repo URL (jemon: https://github.com/owner/repo)")
+        self._hd_repo.setFont(hud_font(10))
+        self._hd_repo.setFixedHeight(30)
+        self._hd_repo.setStyleSheet(self._fs)
+        form.addWidget(self._hd_repo)
+
+        _row = QHBoxLayout(); _row.setSpacing(6)
+        self._hd_branch = QLineEdit()
+        self._hd_branch.setPlaceholderText("Branch (main)")
+        self._hd_branch.setFont(hud_font(10))
+        self._hd_branch.setFixedHeight(30)
+        self._hd_branch.setStyleSheet(self._fs)
+        _row.addWidget(self._hd_branch)
+        self._hd_repo_name = QLineEdit()
+        self._hd_repo_name.setPlaceholderText("Notun repo naam (repo create-er jonno)")
+        self._hd_repo_name.setFont(hud_font(10))
+        self._hd_repo_name.setFixedHeight(30)
+        self._hd_repo_name.setStyleSheet(self._fs)
+        _row.addWidget(self._hd_repo_name, 1)
+        self._hd_private = QComboBox()
+        self._hd_private.addItems(["Public", "Private"])
+        self._hd_private.setFont(hud_font(9))
+        self._hd_private.setFixedHeight(30)
+        self._hd_private.setStyleSheet(
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 8px; }}")
+        _row.addWidget(self._hd_private)
+        _wrap = QWidget(); _wrap.setLayout(_row)
+        form.addWidget(_wrap)
+
+        _row2 = QHBoxLayout(); _row2.setSpacing(6)
+        self._hd_mode = QComboBox()
+        self._hd_mode.addItems(["AUTO — Mark korbe", "MANUAL — ami korbo"])
+        self._hd_mode.setFont(hud_font(9))
+        self._hd_mode.setFixedHeight(30)
+        self._hd_mode.setStyleSheet(
+            f"QComboBox {{ background: #000d12; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 2px 8px; }}")
+        _row2.addWidget(self._hd_mode)
+        for _label, _fn in (("🌐  WEB SERVICE", self._on_hd_web),
+                            ("🗂️  STATIC SITE", self._on_hd_static),
+                            ("📁  REPO CREATE", self._on_hd_repo_create)):
+            _b = QPushButton(_label)
+            _b.setFixedHeight(30)
+            _b.setFont(hud_font(8, QFont.Weight.Bold))
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _b.setStyleSheet(f"""
+                QPushButton {{ background: #00091a; color: {C.PRI};
+                    border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+                QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            """)
+            _b.clicked.connect(_fn)
+            _row2.addWidget(_b)
+        _wrap2 = QWidget(); _wrap2.setLayout(_row2)
+        form.addWidget(_wrap2)
+
+        self._hd_out = QTextEdit()
+        self._hd_out.setReadOnly(True)
+        self._hd_out.setFont(mono_font(9))
+        self._hd_out.setFixedHeight(110)
+        self._hd_out.setStyleSheet(self._fs.replace("QLineEdit", "QTextEdit"))
+        self._hd_out.setPlainText(
+            "Deploy / repo create-er live report ekhane dekhabe.")
+        form.addWidget(self._hd_out)
+
+    def _hd_manual(self) -> bool:
+        try:
+            return (self._hd_mode is not None
+                    and self._hd_mode.currentText().startswith("MANUAL"))
+        except Exception:
+            return False
+
+    def _on_hd_web(self):
+        self._on_hd_deploy("deploy_web")
+
+    def _on_hd_static(self):
+        self._on_hd_deploy("deploy_static")
+
+    def _on_hd_deploy(self, kind: str):
+        service = (self._hd_service.text() or "").strip() if self._hd_service else ""
+        repo = (self._hd_repo.text() or "").strip() if self._hd_repo else ""
+        branch = (self._hd_branch.text() or "").strip() if self._hd_branch else ""
+        if not service or not repo:
+            if self._hd_out is not None:
+                self._hd_out.setPlainText("Deploy-er jonno service naam + repo URL dao.")
+            return
+        if self._hd_out is not None:
+            self._hd_out.setPlainText("⏳ Deploy cholche… prottek step live dekhabe.")
+        manual = self._hd_manual()
+
+        def worker():
+            try:
+                from plugins import hosting_deploy as _hd
+                if manual:
+                    msg = _hd.run({"action": "manual",
+                                   "url": "https://dashboard.render.com"})
+                else:
+                    msg = _hd.run({"action": kind, "service_name": service,
+                                   "repo_url": repo, "branch": branch or "main"})
+                self._hd_done.emit(str(msg))
+            except Exception as e:
+                self._hd_done.emit(f"Deploy korte parlam na: {e}")
+
+        threading.Thread(target=worker, daemon=True,
+                         name="hosting-deploy").start()
+
+    def _on_hd_repo_create(self):
+        name = (self._hd_repo_name.text() or "").strip() if self._hd_repo_name else ""
+        if not name:
+            if self._hd_out is not None:
+                self._hd_out.setPlainText("Repo create-er jonno repo naam dao.")
+            return
+        private = False
+        try:
+            private = (self._hd_private is not None
+                       and self._hd_private.currentText() == "Private")
+        except Exception:
+            pass
+        if self._hd_out is not None:
+            self._hd_out.setPlainText("⏳ Repo create cholche…")
+        manual = self._hd_manual()
+
+        def worker():
+            try:
+                from plugins import hosting_deploy as _hd
+                if manual:
+                    msg = _hd.run({"action": "manual",
+                                   "url": "https://github.com/new"})
+                else:
+                    msg = _hd.run({"action": "create_repo",
+                                   "repo_name": name, "private": private})
+                self._hd_done.emit(str(msg))
+            except Exception as e:
+                self._hd_done.emit(f"Repo create korte parlam na: {e}")
+
+        threading.Thread(target=worker, daemon=True,
+                         name="hosting-repo-create").start()
+
+    def _on_hd_done(self, msg: str):
+        if self._hd_out is not None:
+            self._hd_out.setPlainText(msg or "Kichu uttor elo na.")
+
+    def _build_browser_setup_box(self, form: QVBoxLayout):
+        """'🧪 BROWSER SETUP' box: Playwright full process + sample code.
+
+        Step by step — Python check -> pip install playwright -> playwright
+        install (browser download ~150 MB) -> verify -> sample run. Every
+        step's status shows live in the output box. The sample is real,
+        runnable code (samples/browser_sample.py): browser kholo, URL-e
+        jao, selector diye click koro, screenshot nao. Long work runs on a
+        worker thread; results come back through _bs_done so only the Qt
+        thread touches widgets. Honest limits are printed on the box:
+        internet lagbe; system Python lagbe (Mark-er bundled Python diye
+        tomar script cholbe na).
+        """
+        form.addSpacing(6)
+        form.addWidget(self._lbl(
+            "🧪  BROWSER SETUP — Playwright full process + sample code",
+            10, True, C.PRI))
+        form.addWidget(self._lbl(
+            "Full process: 1) PC-te Python ache kina check, 2) pip install "
+            "playwright, 3) playwright install (browser download ~150 MB), "
+            "4) verify — browser launch hoy kina, 5) sample code chalao "
+            "(browser kholo → URL → click → screenshot). System Python "
+            "lagbe — Mark-er bundled Python diye tomar script cholbe na. "
+            "pip + download-er jonno internet lagbe.",
+            8, color=C.TEXT_DIM))
+
+        _row = QHBoxLayout(); _row.setSpacing(6)
+        self._bs_url = QLineEdit()
+        self._bs_url.setPlaceholderText("URL — https://example.com")
+        self._bs_url.setText("https://example.com")
+        self._bs_url.setFont(hud_font(10))
+        self._bs_url.setFixedHeight(30)
+        self._bs_url.setStyleSheet(self._fs)
+        _row.addWidget(self._bs_url, 2)
+        self._bs_selector = QLineEdit()
+        self._bs_selector.setPlaceholderText("Selector — a")
+        self._bs_selector.setText("a")
+        self._bs_selector.setFont(hud_font(10))
+        self._bs_selector.setFixedHeight(30)
+        self._bs_selector.setStyleSheet(self._fs)
+        _row.addWidget(self._bs_selector, 1)
+        _wrap = QWidget(); _wrap.setLayout(_row)
+        form.addWidget(_wrap)
+
+        self._bs_status_lbl = self._lbl(
+            "Status: ekhono check hoy ni — 'PYTHON CHECK' chapo.", 8,
+            color=C.TEXT_DIM)
+        form.addWidget(self._bs_status_lbl)
+
+        _btns = QHBoxLayout(); _btns.setSpacing(6)
+        self._bs_check_btn = QPushButton("1️⃣  PYTHON CHECK")
+        self._bs_pip_btn = QPushButton("2️⃣  PIP INSTALL")
+        self._bs_install_btn = QPushButton("3️⃣  BROWSER DOWNLOAD")
+        self._bs_verify_btn = QPushButton("4️⃣  VERIFY")
+        for _b in (self._bs_check_btn, self._bs_pip_btn,
+                   self._bs_install_btn, self._bs_verify_btn):
+            _b.setFixedHeight(30)
+            _b.setFont(hud_font(8, QFont.Weight.Bold))
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _b.setStyleSheet(f"""
+                QPushButton {{ background: #00091a; color: {C.PRI};
+                    border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+                QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            """)
+            _btns.addWidget(_b)
+        _wrap2 = QWidget(); _wrap2.setLayout(_btns)
+        form.addWidget(_wrap2)
+
+        _btns2 = QHBoxLayout(); _btns2.setSpacing(6)
+        self._bs_full_btn = QPushButton("▶  FULL SETUP (1→4)")
+        self._bs_run_btn = QPushButton("▶  RUN SAMPLE")
+        self._bs_copy_btn = QPushButton("📋  COPY CODE")
+        for _b in (self._bs_full_btn, self._bs_run_btn, self._bs_copy_btn):
+            _b.setFixedHeight(30)
+            _b.setFont(hud_font(8, QFont.Weight.Bold))
+            _b.setCursor(Qt.CursorShape.PointingHandCursor)
+            _b.setStyleSheet(f"""
+                QPushButton {{ background: #00091a; color: {C.PRI};
+                    border: 1px solid {C.PRI_DIM}; border-radius: 3px; }}
+                QPushButton:hover {{ background: {C.PRI_GHO}; border-color: {C.PRI}; }}
+            """)
+            _btns2.addWidget(_b)
+        self._bs_check_btn.clicked.connect(self._on_bs_check)
+        self._bs_pip_btn.clicked.connect(self._on_bs_pip)
+        self._bs_install_btn.clicked.connect(self._on_bs_install)
+        self._bs_verify_btn.clicked.connect(self._on_bs_verify)
+        self._bs_full_btn.clicked.connect(self._on_bs_full)
+        self._bs_run_btn.clicked.connect(self._on_bs_run_sample)
+        self._bs_copy_btn.clicked.connect(self._on_bs_copy)
+        _wrap3 = QWidget(); _wrap3.setLayout(_btns2)
+        form.addWidget(_wrap3)
+
+        self._bs_out = QTextEdit()
+        self._bs_out.setReadOnly(True)
+        self._bs_out.setFont(mono_font(9))
+        self._bs_out.setFixedHeight(140)
+        self._bs_out.setStyleSheet(self._fs.replace("QLineEdit", "QTextEdit"))
+        self._bs_out.setPlainText(
+            "Steps:\n"
+            "  1️⃣ Python check — system Python ache kina (version dekhabe)\n"
+            "  2️⃣ pip install playwright — ek click-e install hobe\n"
+            "  3️⃣ playwright install — browser download (~150 MB)\n"
+            "  4️⃣ Verify — Playwright diye browser launch hoy kina\n"
+            "▶ Run sample — samples/browser_sample.py chalabe (URL + "
+            "selector upore bodlano jay).")
+        form.addWidget(self._bs_out)
+
+    def _bs_buttons(self):
+        return (self._bs_check_btn, self._bs_pip_btn, self._bs_install_btn,
+                self._bs_verify_btn, self._bs_full_btn, self._bs_run_btn,
+                self._bs_copy_btn)
+
+    def _bs_run(self, fn):
+        for _b in self._bs_buttons():
+            if _b is not None:
+                _b.setEnabled(False)
+        if self._bs_out is not None:
+            self._bs_out.setPlainText("⏳ Cholche… prottek step live dekhabe.")
+
+        def worker():
+            try:
+                msg = fn()
+            except Exception as e:
+                msg = f"Browser Setup korte parlam na: {e}"
+            self._bs_done.emit(str(msg))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="browser-setup").start()
+
+    def _bs_system_python(self):
+        from core import browser_setup as _bs
+        res = _bs.check_python()
+        return res
+
+    def _on_bs_check(self):
+        def _do():
+            from core import browser_setup as _bs
+            return _bs.check_python()["message"]
+        self._bs_run(_do)
+
+    def _on_bs_pip(self):
+        def _do():
+            from core import browser_setup as _bs
+            res = _bs.check_python()
+            if not res["ok"]:
+                return res["message"]
+            ok, msg, _o = _bs.pip_install_playwright(res["path"])
+            return msg
+        self._bs_run(_do)
+
+    def _on_bs_install(self):
+        def _do():
+            from core import browser_setup as _bs
+            res = _bs.check_python()
+            if not res["ok"]:
+                return res["message"]
+            ok, msg, _o = _bs.playwright_install(res["path"])
+            return msg
+        self._bs_run(_do)
+
+    def _on_bs_verify(self):
+        def _do():
+            from core import browser_setup as _bs
+            res = _bs.check_python()
+            if not res["ok"]:
+                return res["message"]
+            ok, msg = _bs.verify_playwright(res["path"])
+            return msg
+        self._bs_run(_do)
+
+    def _on_bs_full(self):
+        def _do():
+            from core import browser_setup as _bs
+            state = _bs.run_all_steps()
+            lines = []
+            for step in _bs.STEPS:
+                v = state[step]
+                mark = {"done": "✅", "failed": "❌",
+                        "running": "⏳"}.get(v["status"], "⏸️")
+                lines.append(f"{mark} {_bs.STEP_LABELS[step]}")
+                if v["message"]:
+                    lines.append(f"    {v['message']}")
+            return "\n".join(lines)
+        self._bs_run(_do)
+
+    def _on_bs_run_sample(self):
+        url = (self._bs_url.text() or "https://example.com").strip() \
+            if self._bs_url else "https://example.com"
+        selector = (self._bs_selector.text() or "a").strip() \
+            if self._bs_selector else "a"
+
+        def _do():
+            from core import browser_setup as _bs
+            res = _bs.check_python()
+            if not res["ok"]:
+                return res["message"]
+            ok, msg, _o = _bs.run_sample(res["path"], url, selector)
+            return msg
+        self._bs_run(_do)
+
+    def _on_bs_copy(self):
+        try:
+            from core import browser_setup as _bs
+            url = (self._bs_url.text() or "https://example.com").strip() \
+                if self._bs_url else "https://example.com"
+            selector = (self._bs_selector.text() or "a").strip() \
+                if self._bs_selector else "a"
+            code = _bs.sample_code(url, selector)
+            from PyQt6.QtGui import QGuiApplication
+            QGuiApplication.clipboard().setText(code)
+            if self._bs_out is not None:
+                self._bs_out.setPlainText(
+                    "📋 Sample code copy hoye geche — jekono editor-e paste "
+                    "koro, tarpor `python browser_sample.py` chalao.")
+        except Exception as e:
+            if self._bs_out is not None:
+                self._bs_out.setPlainText(f"Copy korte parlam na: {e}")
+
+    def _on_bs_done(self, msg: str):
+        for _b in self._bs_buttons():
+            if _b is not None:
+                _b.setEnabled(True)
+        if self._bs_out is not None:
+            self._bs_out.setPlainText(msg or "Kichu uttor elo na.")
+        if self._bs_status_lbl is not None and msg:
+            first = (msg or "").splitlines()[0] if msg else ""
+            if first:
+                self._bs_status_lbl.setText(first)
 
     def _build_video_edit_box(self, form: QVBoxLayout):
         """'🎬 VIDEO EDITOR' — open a video, set in/out by clicking, Cut/Export.
@@ -4677,7 +5223,7 @@ class PluginSettingsOverlay(QWidget):
 
         Same shape as _build_create_repo_box but the Create button runs
         core.browser_automation.github_new_repo on a worker thread: Mark
-        drives the user's own logged-in Chrome via the no-extension
+        drives the user's own logged-in Chrome via the direct
         Playwright/CDP driver — no GitHub token is used, asked for, or
         shown. If the driver is not ready (no Playwright / Chrome not
         reachable) the flow's plain message is shown in red.
@@ -4789,7 +5335,7 @@ class PluginSettingsOverlay(QWidget):
 
         Same worker-thread + pyqtSignal pattern as _build_create_repo_box.
         Runs core.browser_automation.render_deploy: Mark drives the user's
-        own logged-in Chrome on dashboard.render.com via the no-extension
+        own logged-in Chrome on dashboard.render.com via the direct
         driver — no Render API key is used or asked for. If the driver is
         not ready the flow's plain message is shown in red.
         """
@@ -5558,7 +6104,7 @@ class JarvisLinkOverlay(QWidget):
         lay.addWidget(self._ip_lbl)
         self._dash_lbl = _lbl("🖥️ Dashboard: …", 8, color=C.TEXT_DIM)
         lay.addWidget(self._dash_lbl)
-        # Render URL + browser token (Chrome extension) — read from
+        # Render URL + browser token (browser helper) — read from
         # plugin_config["jarvis_link"] in _tick; the Render line stays hidden
         # until a render_url is actually configured, to save space.
         self._render_lbl = _lbl("", 8, color=C.TEXT_DIM)
